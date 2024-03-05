@@ -51,7 +51,7 @@ class PromptLearner(nn.Module):
         self.n_ctx = n_ctx 
         self.ctx_dim = ctx_dim
 
-    def forward(self,indices, test_class=False, infer=False):
+    def forward(self, indexs, test_class=False, infer=False):
         if test_class:
             prompt_prefix =' '.join(['x'] * self.n_ctx*self.args.text_prompt)
             prompts = [prompt_prefix + ' ' + name + '.' for name in test_class]
@@ -66,8 +66,8 @@ class PromptLearner(nn.Module):
             self.register_buffer( 'token_prefix', embedding[:, :1, :]) # SOS, [n_cls, 1, ctx_dim]
             self.register_buffer( 'token_suffix', embedding[:, 1+(self.n_ctx*self.args.text_prompt):,:]) # CLS, EOS, [n_cls, -1, ctx_dim]
             self.n_cls = len(test_class)
-        batch = indices.shape[0]
-        ctx=self.text_prompt[indices].view(batch, self.n_ctx*self.args.text_prompt, self.ctx_dim)
+        batch = indexs.shape[0]
+        ctx=self.text_prompt[indexs].view(batch, self.n_ctx * self.args.text_prompt, self.ctx_dim)
         tokenized_prompts = self.tokenized_prompts.view(self.n_cls,-1)
         n_cls = self.n_cls
 
@@ -152,8 +152,9 @@ class CLIP(nn.Module):
         if torch.cuda.device_count() > 1:
             self.text_encoder = nn.DataParallel(self.text_encoder)
 
-        self.prompt_learner = PromptLearner(self.args, class_names, clip_model, text_prompt, n_ctx=n_ctx)
         self.text_key = text_key
+        #也定义为一个网络模块，
+        self.prompt_learner = PromptLearner(self.args, class_names, clip_model, text_prompt, n_ctx=n_ctx)
         # 3. image encoder
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
@@ -170,10 +171,10 @@ class CLIP(nn.Module):
         if test:
             n_test = len(test_class)
             probability = image_features @ self.text_key.t()
-            _, indices = probability.topk(k=min(self.args.text_prompt,probability.shape[1]), dim=1, largest=True)
+            _, indexs = probability.topk(k=min(self.args.text_prompt,probability.shape[1]), dim=1, largest=True)
 
             # 通过 prompt_learner来学习prompt，再送入encoder
-            text_prompt, tokenized_prompts = self.prompt_learner(indices,test_class,test)
+            text_prompt, tokenized_prompts = self.prompt_learner(indexs,test_class,test)
             text_features = self.text_encoder(text_prompt,tokenized_prompts)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             logit_scale = self.logit_scale.exp()
@@ -184,18 +185,18 @@ class CLIP(nn.Module):
             return logits
         # 2.2 train过程
         else:
-            n_class = self.n_class
-            # 2.2.1 image feature 和 attribute key 之间计算相似度，取topK个 key
-            # 2.2.2 @运算，矩阵相乘，等价于np.matmul(A, B)
+            # 2.2.1 image和key计算相似度，取topK个 key;             @运算，矩阵相乘，等价于np.matmul(A, B)
             probability = image_features @ self.text_key.t()
-            # 2.2.3 矩阵.topk()方法，找出矩阵中最大（小）的k个元素及它们的索引，这里相当于是找出相似度最大的k个prompt key
-            _, indices = probability.topk(k=min(self.args.text_prompt, probability.shape[1]), dim=1, largest=True)
-            chosen_keys = self.text_key[indices]
-            text_prompt, tokenized_prompts, nc_prompts, nc_tokenized_prompts = self.prompt_learner(indices)
+            # 2.2.2 矩阵.topk()方法，找出矩阵中最大（小）的k个元素及它们的索引
+            _, indexs = probability.topk(k=min(self.args.text_prompt, probability.shape[1]), dim=1, largest=True)
+            # 2.2.3 取出匹配的k个key
+            chosen_keys = self.text_key[indexs]
+            # 2.2.4
+            text_prompt, tokenized_prompts, nc_prompts, nc_tokenized_prompts = self.prompt_learner(indexs)
             # 将text送入 text encoder, todo 有两次text encoder调用，nc代表什么？
             text_features = self.text_encoder(text_prompt,tokenized_prompts)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            text_features = text_features.view(image_features.shape[0], n_class, -1)
+            text_features = text_features.view(image_features.shape[0], self.n_class, -1)
             image_features = image_features.unsqueeze(1)
             logit_scale = self.logit_scale.exp()
             logits = logit_scale * (image_features * text_features).sum(-1)
@@ -236,7 +237,7 @@ class CoOp:
 
         # prompt learner
         ctx_dim = clip_model.ln_final.weight.shape[0]
-        # 2. （key，prompt）向量采用正态初始化
+        # 2. Attribute Word Bank初始化，（key，prompt）向量采用正态初始化
         text_key = torch.empty(self.num_prompt, ctx_dim, dtype=self.dtype).cuda()
         nn.init.normal_(text_key, std=0.02)#从正态分布中取值，来初始化神经网络层的权重
         text_prompt = torch.empty(self.num_prompt, n_ctx, ctx_dim, dtype=self.dtype).cuda()

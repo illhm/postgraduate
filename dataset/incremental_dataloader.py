@@ -61,6 +61,7 @@ class IncrementalDataset:
             increment=increment,
             validation_split=validation_split
         )
+        print("_setup_data complete")
 
         self._current_task = 0
         self._batch_size = batch_size
@@ -105,16 +106,10 @@ class IncrementalDataset:
             if int(data_list[i][1]) in label_list:
                 indexs.append(i)
                 targets.append(data_list[i][1])
-        for_memory = (indexs.copy(), targets.copy())
 
-        if memory is None:
-            all_indexs = indexs
-        else:
-            memory_indices, memory_targets = memory
-            memory_indices2 = np.tile(memory_indices, (1,))
-            all_indexs = np.concatenate([memory_indices2, indexs])
+        all_indexs = indexs
 
-        return all_indexs, for_memory
+        return all_indexs
 
     def get_data_index_test(self, data_list, label, mode="test", memory=None):
         label_indices = []
@@ -145,9 +140,8 @@ class IncrementalDataset:
         print(self.increments)
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
-        class_name = self.class_names
-        test_class = class_name[:max_class]
-        class_name = class_name[min_class:max_class]
+        train_class_names = self.class_names[min_class:max_class]
+        test_class_names = self.class_names[:max_class]
 
         train_indexs, for_memory = self.get_data_index(self.train_dataset, list(range(min_class, max_class)),
                                                         mode="train", memory=memory)
@@ -172,7 +166,7 @@ class IncrementalDataset:
 
         self._current_task += 1
 
-        return task_info, self.train_data_loader, class_name, test_class, self.test_data_loader, self.test_data_loader, for_memory
+        return task_info, self.train_data_loader, train_class_names, test_class_names, self.test_data_loader, self.test_data_loader, for_memory
 
     def get_galary(self, task, batch_size=10):
         indexes = []

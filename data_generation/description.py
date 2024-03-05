@@ -1,6 +1,9 @@
 import json
 from openai import OpenAI
 from tqdm import tqdm
+import os.path as osp
+
+from main_incremental_submit import parse_option
 
 global_api_key = "sk-Ffy7Zo73qNffmZE9vxroEqv0uigsGdrkWO7oQREiJpzjpxoR" # Enter Your API Key!!!
 dataset_name = "Caltech101" # Enter Your Dataset Name, e.g. EuroSAT
@@ -44,36 +47,58 @@ def get_completion(client, prompt, model="gpt-3.5-turbo", temperature=1):
     return response.choices[0].message.content.strip()
 
 #1.0.0版本之后的openai接口调用代码
-client = OpenAI(
-    api_key=global_api_key,
-    base_url="https://api.chatanywhere.com.cn/v1"
-)
+# client = OpenAI(
+#     api_key=global_api_key,
+#     base_url="https://api.chatanywhere.com.cn/v1"
+# )
+#
+# with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/classname/'+dataset_name+'.txt', 'r') as f:
+#     classnames = f.read().split("\n")[:-1]
+# result = {}
+#
+# for classname in tqdm(classnames):
+#     info = infos[dataset_name]
+#     # prompt替换和生成
+#     prompts = [template.format(info[0], info[1]).format(classname) + "Describe it in 20 words." for template in templates]
+#     print("\r\n prompts:{}".format(prompts))
+#     responses = [get_completion(client,prompt) for prompt in prompts]
+#     result[classname] = responses
+#
+#     with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/description/'+dataset_name+'.json','w') as f:
+#         json.dump(result, f, indent=4)
+#
+#
+# def generate_description_for_classes(datasetName, classenames):
+#     for classname in tqdm(classnames):
+#         info = infos[datasetName]
+#         # prompt替换和生成
+#         prompts = [template.format(info[0], info[1]).format(classname) + "Describe it in 20 words." for template in
+#                    templates]
+#         print("\r\n prompts:{}".format(prompts))
+#         responses = [get_completion(client, prompt) for prompt in prompts]
+#         result[classname] = responses
+#
+#         with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/description/' + datasetName + '.json', 'w') as f:
+#             json.dump(result, f, indent=4)
 
-with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/classname/'+dataset_name+'.txt', 'r') as f:
-    classnames = f.read().split("\n")[:-1]
-result = {}
 
-for classname in tqdm(classnames):
-    info = infos[dataset_name]
-    # prompt替换和生成
-    prompts = [template.format(info[0], info[1]).format(classname) + "Describe it in 20 words." for template in templates]
-    print("\r\n prompts:{}".format(prompts))
-    responses = [get_completion(client,prompt) for prompt in prompts]
-    result[classname] = responses
+def get_classes_description(args, classenames, text_prompts=None):
+    # 加载description和structure内容
+    if text_prompts is None:
+        f_json = osp.join(args.gpt_dir + '/description', args.dataset + '.json')
+        with open(f_json, 'r') as f:
+            text_prompts = json.load(f)
+    reuslt=[text_prompts[i] for i in classenames]
+    return reuslt
 
-    with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/description/'+dataset_name+'.json','w') as f:
-        json.dump(result, f, indent=4)
+def get_classes_structure(args, classenames):
+    # 加载description和structure内容
+    f_topo = osp.join(args.gpt_dir + '/structure', args.dataset + '.json')
+    with open(f_topo, 'r') as f:
+        text_topos = json.load(f)
+    reuslt=[text_topos[i] for i in classenames]
+    return reuslt
 
-
-def get_description_from_classes(classenames):
-    for classname in tqdm(classnames):
-        info = infos[dataset_name]
-        # prompt替换和生成
-        prompts = [template.format(info[0], info[1]).format(classname) + "Describe it in 20 words." for template in
-                   templates]
-        print("\r\n prompts:{}".format(prompts))
-        responses = [get_completion(client, prompt) for prompt in prompts]
-        result[classname] = responses
-
-        with open('D:/project/2024-AAAI-HPT-main/data/gpt_data/description/' + dataset_name + '.json', 'w') as f:
-            json.dump(result, f, indent=4)
+if __name__ == "__main__":
+    args = parse_option()
+    get_classes_description(args,["face", "leopard", "motorbike"])

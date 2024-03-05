@@ -15,15 +15,22 @@ import hp_clip
 def parse_option():
     parser = argparse.ArgumentParser('Prompt Learning for CLIP', add_help=False)
 
-    parser.add_argument("--root", type=str, default='D:/dataset', help='parent path of dataset')
+    parser.add_argument("--root", type=str, default='/home/qc/dataset', help='parent path of dataset')
     parser.add_argument("--db_name", type=str, default='Caltech101', help='dataset name')
     parser.add_argument("--mean_per_class", action='store_true', help='mean_per_class')
     parser.add_argument("--num_runs", type=int, default=10, help='num_runs')
     parser.add_argument("--seed", type=int, default=0, help='random seed')
+    parser.add_argument("--dataset", type=str, default="Caltech101", help="name of dataset")
+    parser.add_argument("--gpt_dir", type=str, default="/home/qc/AttriCLIP-main/data/gpt_data", help="path of gpt's data,including classes,descriptions,sturctures")
+    parser.add_argument("--pool_size", type=int, default=20, help="log output directory")
+    parser.add_argument("--description_num", type=int, default=5, help="log output directory")
+    parser.add_argument("--output-dir", type=str, default="/home/qc/AttriCLIP-main/result", help="log output directory")
+    parser.add_argument("--use_cuda", type=bool, default=True)
 
-    parser.add_argument("--backbone_path", type=str, default='E:/model/ViT-L-14.pt', help='path of backbone model file')
+    parser.add_argument("--backbone_path", type=str, default='/home/qc/pretrained_model/ViT-L-14.pt', help='path of backbone model file')
+    parser.add_argument("--backbone", type=str, default='ViT-L/14', help='path of backbone model file')
     parser.add_argument("--keyprompt_path", type=str, default=None, help='path of keyprompt file')
-    parser.add_argument("--save_path", type=str, default='path', help='path to save run results')
+    parser.add_argument("--save_path", type=str, default='/home/qc/AttriCLIP-main/result', help='path to save run results')
     parser.add_argument("--ID", type=str, default='description', help='description')
 
     # optimization setting

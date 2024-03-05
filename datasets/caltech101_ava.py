@@ -36,7 +36,7 @@ class Caltech101(Dataset):
         if os.path.exists(self.split_path):
             train, val, test = read_split(self.split_path, self.image_dir,train_transform)
         else:
-            train, val, test = read_and_split_data(self.image_dir, ignored=IGNORED, new_cnames=NEW_CNAMES)
+            train, val, test = read_and_split_data(self.image_dir, train_transform, ignored=IGNORED, new_cnames=NEW_CNAMES)
             save_split(train, val, test, self.split_path, self.image_dir)#参照上面，加入transform，改动返回内容，
 
         self.train_set, self.val, self.test_set=train, val, test
