@@ -11,7 +11,7 @@ from h_prompt import Hierachical_Prompt_Plugin
 import datasets
 from clip import clip
 from hp_clip import HP_CLIP
-from datasets.caltech101_ava import Caltech101
+from datasets.caltech101_ava import MyDataset
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -20,7 +20,7 @@ def main(args):
     if torch.cuda.is_available() and args.use_cuda:
         torch.backends.cudnn.benchmark = True
     # 1. 加载数据集
-    caltech=Caltech101(args)
+    caltech=MyDataset(args)
     train_stream,test_stream=caltech.getStreams()
 
     hp=HP_CLIP()

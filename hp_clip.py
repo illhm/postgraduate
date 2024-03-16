@@ -4,14 +4,18 @@ from torch import nn
 import os.path as osp
 import json
 import random
+import os
 
 AVAI_SCHEDS=[]
 """加载 指定name的 原生clip模型"""
-def load_clip_to_cpu(args):
+def load_clip_to_cpu(args, device):
     backbone_name = args.backbone
     url = clip._MODELS[backbone_name]
     # 1.有模型文件就用，没有就下载
-    model_path = clip._download(url,root=args.backbone_path)
+    if os.path.isfile(args.backbone_path):
+        model_path = args.backbone_path
+    else:
+        model_path = clip._download(url,root=args.backbone_path)
     try:
         # loading JIT archive
         model = torch.jit.load(model_path, map_location="cpu").eval()
@@ -20,7 +24,6 @@ def load_clip_to_cpu(args):
         state_dict = torch.load(model_path, map_location="cpu")
     # 2.
     model = clip.build_model(state_dict or model.state_dict())
-
     return model
 
 class VisionEncoder(nn.Module):

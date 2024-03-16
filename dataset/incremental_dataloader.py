@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
 
+from datasets.caltech101_ava import SplitCaltech
 from .imagenet100 import imagenet100
 
 try:
@@ -44,24 +45,20 @@ class SubsetRandomSampler(Sampler):
 
 class IncrementalDataset:
 
-    def __init__(self, datasets_names, args, random_order=False, shuffle=True, workers=8, batch_size=128, seed=1,
+    def __init__(self, args, random_order=False, shuffle=True, workers=8, batch_size=128, seed=1,
                  increment=10, validation_split=0.):
-        self.dataset_name = datasets_names.lower().strip()
         """获取各个数据集的加载类及transform"""
-        datasets = _get_datasets(datasets_names)
-        self.train_transforms = datasets[0].train_transforms
-        self.common_transforms = datasets[0].common_transforms
+        dataset_class = _get_dataset_class(args.db_name)
         self.args = args
         """真正加载数据集图片，并实例化train和test 的dataset对象"""
         self._setup_data(
-            datasets,
+            dataset_class,
             args.root,
             random_order=random_order,
             seed=seed,
             increment=increment,
             validation_split=validation_split
         )
-        print("_setup_data complete")
 
         self._current_task = 0
         self._batch_size = batch_size
@@ -69,54 +66,42 @@ class IncrementalDataset:
         self._shuffle = shuffle
         self.sample_per_task_testing = {}
 
-    def _setup_data(self, datasets, path, random_order=False, seed=1, increment=10, validation_split=0.):
+    def _setup_data(self, dataset_class, dataset_dir, random_order=False, seed=1, increment=10, validation_split=0.):
         self.increments = []
-        train_transform = transforms.Compose(self.train_transforms)
-        test_transform = transforms.Compose(self.common_transforms)
+        self.class_order = []
+        all_data_loaded = dataset_class(dataset_dir)
+        self.train_dataset, self.test_dataset, self.eval_dataset = all_data_loaded.getTrainTest_Dataset()
+        self.class_names = all_data_loaded.get_class_names()
 
-        for dataset in datasets:
-            base_dataset = dataset.base_dataset(dataset_dir=path, train_transform=train_transform,
-                                             test_transform=test_transform)
-            train_dataset, test_dataset, eval_dataset = base_dataset.getStreams()
-            self.class_names = base_dataset.get_class_names()
-
-            # 获取class的order列表
-            order = [i for i in range(self.args.num_class)]
-            if random_order:
-                random.seed(seed)
-                random.shuffle(order)
-            elif dataset.class_order is not None:
-                order = dataset.class_order
-
-            self.increments = [increment for _ in range(len(order) // increment)]
-
-        self.train_dataset = train_dataset
-        self.test_dataset = test_dataset
+        # 生成class的order列表
+        order = [i for i in range(self.args.num_class)]
+        if random_order:
+            random.seed(seed)
+            random.shuffle(order)
+        self.class_order.append(order)
+        # self.increments里存的是每个task中的class数量，比如[10,10,10]
+        self.increments = [increment for _ in range(len(order) // increment)]
 
     @property
     def n_tasks(self):
         return len(self.increments)
 
     """从data_list中将符合指定label_list的数据全部提取出来"""
-    def get_data_index(self, data_list, label_list, mode="train", memory=None):
+    def get_dataIndexs_by_labels(self, dataset, label_list, mode="train"):
         indexs = []
-        targets = []
-
-        for i in range(len(data_list)):
-            if int(data_list[i][1]) in label_list:
+        for i,item in enumerate(dataset.get_dataList()):
+            if item[1] in label_list:
                 indexs.append(i)
-                targets.append(data_list[i][1])
 
-        all_indexs = indexs
+        return indexs
 
-        return all_indexs
-
-    def get_data_index_test(self, data_list, label, mode="test", memory=None):
+    """获取test数据，范围是训练至今的所有任务"""
+    def get_data_index_test(self, dataset, label, mode="test"):
         label_indices = []
         label_targets = []
 
-        np_target = np.array([i[1] for i in data_list], dtype="uint32")
-        np_indices = np.array(list(range(len(data_list))), dtype="uint32")
+        np_indexs = np.array(list(range(len(dataset.get_dataList()))), dtype="uint32")
+        np_target = np.array([i[1] for i in dataset.get_dataList()], dtype="uint32")
 
         for t in range(len(label) // self.args.class_per_task):
             task_ids = []
@@ -127,7 +112,7 @@ class IncrementalDataset:
             task_ids.ravel()
             random.shuffle(task_ids)
 
-            label_indices.extend(list(np_indices[task_ids]))
+            label_indices.extend(list(np_indexs[task_ids]))
             label_targets.extend(list(np_target[task_ids]))
             if (t not in self.sample_per_task_testing.keys()):
                 self.sample_per_task_testing[t] = len(task_ids)
@@ -135,30 +120,29 @@ class IncrementalDataset:
         label_indices.ravel()
         return list(label_indices), label_targets
 
-    def new_task(self, memory=None):
-        print(self._current_task)
-        print(self.increments)
+    def new_task(self):
+        print("current_task：{},class_num：{}".format(self._current_task,self.increments[self._current_task]))
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
         train_class_names = self.class_names[min_class:max_class]
         test_class_names = self.class_names[:max_class]
-
-        train_indexs, for_memory = self.get_data_index(self.train_dataset, list(range(min_class, max_class)),
-                                                        mode="train", memory=memory)
+        # todo list(range(min_class, max_class))->[order[i] for in range(min_class, max_class)]
+        train_indexs = self.get_dataIndexs_by_labels(self.train_dataset, list(range(min_class, max_class)),
+                                                                 mode="train")
         self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,
                                                              shuffle=False, num_workers=8,
-                                                             sampler=SubsetRandomSampler(train_indexs, True))
+                                                             #Sampler参数用于指定如何对数据进行采样，即确定每个批次中包含哪些样本。SubsetRandomSampler意为从给定的索引子集中进行随机采样
+                                                             sampler=SubsetRandomSampler(train_indexs, False))
 
         test_indexs, _ = self.get_data_index_test(self.test_dataset, list(range(max_class)), mode="test")
         self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,
                                                             shuffle=False, num_workers=8,
                                                             sampler=SubsetRandomSampler(test_indexs, False))
-        # self.test_data_loader=None
-
+        #没处理val_data_loader
         task_info = {
             "min_class": min_class,
             "max_class": max_class,
-            "task": self._current_task,
+            "current_task": self._current_task,
             "max_task": len(self.increments),
             "n_train_data": len(train_indexs),
             "n_test_data": len(test_indexs)
@@ -166,7 +150,7 @@ class IncrementalDataset:
 
         self._current_task += 1
 
-        return task_info, self.train_data_loader, train_class_names, test_class_names, self.test_data_loader, self.test_data_loader, for_memory
+        return  self.train_data_loader, self.test_data_loader,train_class_names, test_class_names,  task_info
 
     def get_galary(self, task, batch_size=10):
         indexes = []
@@ -200,12 +184,12 @@ class IncrementalDataset:
     def get_custom_loader_class(self, class_id, mode="train", batch_size=10, shuffle=False):
 
         if (mode == "train"):
-            train_indices, for_memory = self.get_data_index(self.train_dataset.targets, class_id, mode="train",
-                                                            memory=None)
+            train_indices, for_memory = self.get_dataIndexs_by_labels(self.train_dataset.targets, class_id, mode="train",
+                                                                      memory=None)
             data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=batch_size, shuffle=False,
                                                       num_workers=4, sampler=SubsetRandomSampler(train_indices, True))
         else:
-            test_indices, _ = self.get_data_index(self.test_dataset.targets, class_id, mode="test")
+            test_indices, _ = self.get_dataIndexs_by_labels(self.test_dataset.targets, class_id, mode="test")
             data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False,
                                                       num_workers=4, sampler=SubsetRandomSampler(test_indices, False))
 
@@ -248,14 +232,14 @@ class IncrementalDataset:
 
 
 def _get_datasets(dataset_names):
-    return [_get_dataset(dataset_name) for dataset_name in dataset_names.split("-")]
+    return [_get_dataset_class(dataset_name) for dataset_name in dataset_names.split("-")]
 
 
-def _get_dataset(dataset_name):
+def _get_dataset_class(dataset_name):
     dataset_name = dataset_name.lower().strip()
 
     if dataset_name == "caltech101":
-        return caltech101_h
+        return SplitCaltech
     if dataset_name == "imagenet100":
         return iIMAGENET100
     else:
@@ -288,24 +272,3 @@ class iIMAGENET100(DataHandler):
         transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
     ]
 
-
-from datasets.caltech101_ava import Caltech101
-
-
-class caltech101_h(DataHandler):
-    base_dataset = Caltech101
-    train_transforms = [
-        transforms.Resize(224, interpolation=BICUBIC),
-        transforms.CenterCrop(224),
-        lambda image: image.convert("RGB"),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-    ]
-    common_transforms = [
-        transforms.Resize(224, interpolation=BICUBIC),
-        transforms.CenterCrop(224),
-        lambda image: image.convert("RGB"),
-        transforms.ToTensor(),
-        transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-    ]

@@ -74,22 +74,20 @@ def write_json(obj, fpath):
     with open(fpath, "w") as f:
         json.dump(obj, f, indent=4, separators=(",", ": "))
 
-def read_split(filepath, path_prefix,train_transform):
-    def _convert(items,transform):
+def read_split(filepath, path_prefix):
+    def _convert(items):
         out = []
         for impath, label, classname in items:
             impath = os.path.join(path_prefix, impath)
-            image = Image.open(impath).convert('RGB')
-            image_trans = transform(image)
-            item = [image_trans,int(label),classname]
+            item = [impath,int(label),classname]
             out.append(item)
         return out
 
     print(f"Reading split from {filepath}")
     split = read_json(filepath)
-    train = _convert(split["train"],train_transform)
-    val = _convert(split["val"],train_transform)
-    test = _convert(split["test"],train_transform)
+    train = _convert(split["train"])
+    val = _convert(split["val"])
+    test = _convert(split["test"])
 
     return train, val, test
 
@@ -162,7 +160,7 @@ def subsample_classes(*args, subsample="all"):
 
     return output
 
-def read_and_split_data(image_dir,transform,  p_trn=0.5, p_val=0.2, ignored=[], new_cnames=None):
+def read_and_split_data(image_dir,  p_trn=0.5, p_val=0.2, ignored=[], new_cnames=None):
         # The data are supposed to be organized into the following structure
         # =============
         # images/
@@ -181,9 +179,7 @@ def read_and_split_data(image_dir,transform,  p_trn=0.5, p_val=0.2, ignored=[], 
             items = []
             for im in ims:
                 impath = os.path.join(image_dir, im)
-                image = Image.open(impath).convert('RGB')
-                image_trans = transform(image)
-                item = [image_trans, int(label), classname]# is already 0-based
+                item = [impath, int(label), classname]# is already 0-based
                 items.append(item)
             return items
 

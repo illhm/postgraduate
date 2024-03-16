@@ -1,9 +1,9 @@
-import argparse
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+import argparse
 import pickle
 import random
 import shutil
-
 import numpy as np
 import torch
 
@@ -11,6 +11,7 @@ import dataset.incremental_dataloader as incremental_dataloader
 from classifier.CoOp import CoOp
 from utils import mkdir_p
 import hp_clip
+
 
 def parse_option():
     parser = argparse.ArgumentParser('Prompt Learning for CLIP', add_help=False)
@@ -36,7 +37,7 @@ def parse_option():
     # optimization setting
     parser.add_argument("--lr", type=float, default=1e-3, help='num_runs')
     parser.add_argument("--wd", type=float, default=0.0, help='num_runs')
-    parser.add_argument("--epochs", type=int, default=10, help='num_runs')
+    parser.add_argument("--epochs", type=int, default=5, help='num_runs')
     parser.add_argument("--train_batch", type=int, default=32, help='num_runs')
     parser.add_argument("--test_batch", type=int, default=32, help='num_runs')
 
@@ -71,7 +72,7 @@ def setup_seed(seed):
 
 def main(args):
     # 1. 读取数据集，设置为增量形式
-    inc_dataset = incremental_dataloader.IncrementalDataset(datasets_names=args.db_name, args=args, random_order=False,
+    inc_dataset = incremental_dataloader.IncrementalDataset( args=args, random_order=False,
                                                             # random class
                                                             shuffle=True, seed=args.seed, batch_size=args.train_batch,
                                                             workers=8, validation_split=0,
@@ -99,8 +100,7 @@ def main(args):
     # 3. 开始训练过程
     for task in range(start_task, args.num_task):
         # 3.1 获取增量任务及增量数据
-        task_info, train_loader, class_name, test_class, val_loader, test_loader, for_memory = inc_dataset.new_task(
-            memory)
+        train_loader, test_loader, train_classnames, test_classnames, task_info  = inc_dataset.new_task()
         # 3.2 根据配置项，可实现接续训练
         if start_task != 0 and start_task == task:
             inc_dataset._current_task = task
@@ -109,12 +109,11 @@ def main(args):
             inc_dataset.sample_per_task_testing = sample_per_task_testing
 
         # 打印训练参数
-        print('task {} start to fit'.format(task))
-        print("task_info:",task_info)
+        print('task {} start to fit, taskInfo:{}'.format(task,str(task_info)))
         print("sample_per_task_testing",inc_dataset.sample_per_task_testing)  # dict{task:len(test)}
 
         # 3.3 增量task数据送入模型开始增量训练
-        model.fit(train_loader, class_name, task_info['n_train_data'])
+        model.fit(train_loader, train_classnames, task_info)
 
         # 3.4 保存训练模型及（key，prompt）等运行结果
         if not os.path.isdir(args.save_path):
@@ -123,7 +122,7 @@ def main(args):
         torch.save(model.model.state_dict()['text_key'], os.path.join(args.save_path, 'text_key.pth.tar'))
         torch.save(model.model.prompt_learner.state_dict()['text_prompt'],
                    os.path.join(args.save_path, 'text_prompt.pth.tar'))
-        acc = model.accuracy(test_loader, args.num_test, test_class, mean_per_class=args.mean_per_class)
+        acc = model.accuracy(test_loader, args.num_test, test_classnames, mean_per_class=args.mean_per_class)
         print('acc', acc)
         # 3.4 运行数据指标保存
         with open(args.save_path + "/memory_" + str(args.current_task) + ".pickle", 'wb') as handle:
