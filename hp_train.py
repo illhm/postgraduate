@@ -1,5 +1,3 @@
-import avalanche
-from avalanche import models
 import torch
 import torch.nn as nn
 import os
@@ -8,9 +6,7 @@ import argparse
 from avalanche.training import Naive
 from h_prompt import Hierachical_Prompt_Plugin
 
-import datasets
-from clip import clip
-from hp_clip import HP_CLIP
+from clip.hp_clip import HP_CLIP
 from datasets.caltech101_ava import MyDataset
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"

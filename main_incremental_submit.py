@@ -3,14 +3,12 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
 import pickle
 import random
-import shutil
 import numpy as np
 import torch
 
 import dataset.incremental_dataloader as incremental_dataloader
 from classifier.CoOp import CoOp
 from utils import mkdir_p
-import hp_clip
 
 
 def parse_option():

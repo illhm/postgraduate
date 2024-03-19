@@ -3,7 +3,11 @@ import hashlib
 import urllib
 import warnings
 from typing import Any, Union, List
+from copy import deepcopy
 
+import numpy as np
+import torch
+import torch.nn as nn
 from PIL import Image
 import torch
 from tqdm import tqdm
@@ -81,7 +85,6 @@ def _transform(n_px):
 def available_models() -> List[str]:
     """Returns the names of available CLIP models"""
     return list(_MODELS.keys())
-
 
 def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit: bool = False, download_root: str = None):
     """Load a CLIP model
@@ -223,3 +226,211 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77, truncate: b
         result[i, :len(tokens)] = torch.tensor(tokens)
 
     return result
+
+class PromptLearner(nn.Module):
+    def __init__(self, args, class_names, clip_model, text_prompt, n_ctx=12, prompt_pos=2):
+        super().__init__()
+        ctx_dim = clip_model.ln_final.weight.shape[0]
+        dtype = clip_model.dtype
+        self.clip_model = clip_model
+        self.args = args
+        n_cls = len(class_names)
+        self.dtype = dtype
+        # 1. 拼装prompt
+        # 1.1 组装前缀，得到形如x x x x 的内容
+        prompt_prefix = ' '.join(['x'] * n_ctx * self.args.text_prompt)
+        # 1.2 得到形如['x x x x x x x x x x face.',...]的内容
+        prompts = [prompt_prefix + ' ' + name + '.' for name in class_names]
+        classnames = [name.replace('_', ' ') for name in class_names]
+        # 1.3 得到classname对应的token词数
+        self.name_lens = [len(_tokenizer.encode(name)) for name in class_names]
+        self.prompt_pos = prompt_pos
+
+        self.text_prompt = text_prompt
+        # tokenization就是将原始文本切分成子单元，通常所说的分词，分出的每一个词语我们把它称为token
+        tokenized_prompts = torch.cat([tokenize(p) for p in prompts])
+        self.tokenized_prompts = tokenized_prompts
+        with torch.no_grad():
+            embedding = clip_model.token_embedding(tokenized_prompts.cuda()).type(self.dtype)
+        self.register_buffer('token_prefix', embedding[:, :1, :])
+        self.register_buffer('token_suffix', embedding[:, 1 + (n_ctx * self.args.text_prompt):, :])
+
+        nc_prompts = [prompt_prefix + '.']
+        nc_tokenized_prompts = torch.cat([tokenize(p) for p in nc_prompts])
+        self.nc_tokenized_prompts = nc_tokenized_prompts
+        with torch.no_grad():
+            embedding = clip_model.token_embedding(nc_tokenized_prompts.cuda()).type(self.dtype)
+        self.register_buffer('nc_token_prefix', embedding[:, :1, :])
+        self.register_buffer('nc_token_suffix', embedding[:, 1 + n_ctx:, :])
+
+        self.n_cls = n_cls
+        self.n_ctx = n_ctx
+        self.ctx_dim = ctx_dim
+
+    def forward(self, indexs, test_class=False, infer=False):
+        if test_class:
+            prompt_prefix = ' '.join(['x'] * self.n_ctx * self.args.text_prompt)
+            prompts = [prompt_prefix + ' ' + name + '.' for name in test_class]
+            self.name_lens = [len(_tokenizer.encode(name)) for name in test_class]
+
+            self.prompt_pos = self.prompt_pos
+
+            tokenized_prompts = torch.cat([tokenize(p) for p in prompts])
+            self.tokenized_prompts = tokenized_prompts
+            with torch.no_grad():
+                embedding = self.clip_model.token_embedding(tokenized_prompts.cuda()).type(self.dtype)
+            self.register_buffer('token_prefix', embedding[:, :1, :])  # SOS, [n_cls, 1, ctx_dim]
+            self.register_buffer('token_suffix', embedding[:, 1 + (self.n_ctx * self.args.text_prompt):,
+                                                 :])  # CLS, EOS, [n_cls, -1, ctx_dim]
+            self.n_cls = len(test_class)
+        # 1. indexs是选中的prompt的索引集合
+        batch = indexs.shape[0]
+        # 1.1 取出对应的prompt
+        ctx = self.text_prompt[indexs].view(batch, self.n_ctx * self.args.text_prompt, self.ctx_dim)
+        tokenized_prompts = self.tokenized_prompts.view(self.n_cls, -1)
+        n_cls = self.n_cls
+
+        if self.prompt_pos == 2:
+            # 增加维度，并在该维度复制tensor，repeat每个参数代表该维度重复的次数
+            prefix = self.token_prefix.unsqueeze(0).repeat(batch, 1, 1, 1)
+            suffix = self.token_suffix.unsqueeze(0).repeat(batch, 1, 1, 1)
+            ctx = ctx.unsqueeze(1).repeat(1, n_cls, 1, 1)
+            prompts = torch.cat([prefix, ctx, suffix], dim=2)
+        elif self.prompt_pos == 1:
+            prompts = []
+            half_n_ctx = self.n_ctx // 2
+            for i in range(n_cls):
+                name_len = self.name_lens[i]
+                prefix_i = self.token_prefix[i:i + 1, :, :].unsqueeze(1)
+                class_i = self.token_suffix[i:i + 1, :name_len, :].unsqueeze(1)
+                suffix_i = self.token_suffix[i:i + 1, name_len:, :].unsqueeze(1)
+                ctx_i_half1 = ctx[:, :half_n_ctx, :].unsqueeze(0)
+                ctx_i_half2 = ctx[:, half_n_ctx:, :].unsqueeze(0)
+                prompt = torch.cat([prefix_i, ctx_i_half1, class_i, ctx_i_half2, suffix_i], dim=2)
+                prompts.append(prompt)
+            prompts = torch.cat(prompts, dim=0)
+        elif self.prompt_pos == 0:
+            prompts = []
+            for i in range(self.n_cls):
+                name_len = self.name_lens[i]
+                prefix_i = self.token_prefix[i:i + 1, :, :].unsqueeze(1)
+                class_i = self.token_suffix[i:i + 1, :name_len, :].unsqueeze(1)
+                suffix_i = self.token_suffix[i:i + 1, name_len:, :].unsqueeze(1)
+                ctx_i = ctx.unsqueeze(0)
+                prompt = torch.cat([prefix_i, class_i, ctx_i, suffix_i], dim=2)
+                prompts.append(prompt)
+            prompts = torch.cat(prompts, dim=0)
+
+        prompts = prompts.squeeze(2).view(batch * self.n_cls, -1, self.ctx_dim)
+        tokenized_prompts = tokenized_prompts.unsqueeze(0).repeat(batch, 1, 1).view(batch * self.n_cls, -1)
+        self.prompts = prompts
+        self.prompts_token = tokenized_prompts
+        if infer:
+            return prompts, tokenized_prompts
+        else:
+            nc_prompts, nc_tokenized_prompts = self.only_prefix()
+            return prompts, tokenized_prompts, nc_prompts, nc_tokenized_prompts
+
+    def only_prefix(self):
+        ctx = self.text_prompt
+        prompt_size = ctx.shape[0]
+        nc_tokenized_prompts = self.nc_tokenized_prompts.repeat(prompt_size, 1)
+        prefix = self.nc_token_prefix.repeat(prompt_size, 1, 1)
+        suffix = self.nc_token_suffix.repeat(prompt_size, 1, 1)
+        nc_prompts = torch.cat([prefix, ctx, suffix], dim=1)
+        return nc_prompts, nc_tokenized_prompts
+
+class TextEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.transformer = clip_model.transformer
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
+
+    # text encoder对text输出的处理在这里
+    def forward(self, x, tokenized_prompts):
+        x = x + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x).type(self.dtype)
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        return x
+
+class CLIP(nn.Module):
+    def __init__(self, args, class_names, clip_model, text_key, text_prompt, n_ctx=12):
+        super().__init__()
+        self.n_class = len(class_names)
+        self.args = args
+
+        # 1. 实例化 text enoder
+        self.text_encoder = TextEncoder(clip_model)
+        if torch.cuda.device_count() > 1:
+            self.text_encoder = nn.DataParallel(self.text_encoder)
+
+        # 2. text_key 和text_prompt分开了，
+        self.text_key = text_key
+        # 2.1 只将text_prompt送入promptLearner进行学习
+        self.prompt_learner = PromptLearner(self.args, class_names, clip_model, text_prompt, n_ctx=n_ctx)
+        # 3. image encoder，直接使用clip中的，未做修改
+        self.image_encoder = clip_model.visual
+        self.logit_scale = clip_model.logit_scale
+
+    def forward(self, image, num_test=None, test_class=None, test=False):
+        # 1. 图片送入image encoder，得到image feature
+        with torch.no_grad():
+            image_features = self.image_encoder(image.type(self.dtype))
+            # 1.1 向量单位化
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            image_features = image_features.detach()
+
+        # 2. test过程
+        if test:
+            n_test = len(test_class)
+            probability = image_features @ self.text_key.t()
+            _, indexs = probability.topk(k=min(self.args.text_prompt, probability.shape[1]), dim=1, largest=True)
+
+            # 通过 prompt_learner来学习prompt，再送入encoder
+            text_prompt, tokenized_prompts = self.prompt_learner(indexs, test_class, test)
+            text_features = self.text_encoder(text_prompt, tokenized_prompts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            logit_scale = self.logit_scale.exp()
+            text_features = text_features.view(image_features.shape[0], n_test, -1)
+            image_features = image_features.unsqueeze(1)
+            logit_scale = self.logit_scale.exp()
+            logits = logit_scale * (image_features * text_features).sum(-1)
+            return logits
+        # 3. train过程
+        else:
+            # 3.1 image和key计算相似度，取topK个 key; probability（32,10）             @运算，矩阵相乘，等价于np.matmul(A, B)；t运算：转置
+            probability = image_features @ self.text_key.t()
+            # 3.2 矩阵.topk()方法，找出矩阵中最大（小）的k个元素及它们的索引
+            _, indexs = probability.topk(k=min(self.args.text_prompt, probability.shape[1]), dim=1, largest=True)
+            # 3.3 取出匹配的k个key
+            chosen_keys = self.text_key[indexs]
+            # 3.4 这里和prompt_learner交互，把选中的prompt的index传进去，
+            text_prompt, tokenized_prompts, nc_prompts, nc_tokenized_prompts = self.prompt_learner(indexs)
+
+            # 3.5 将text送入 text encoder,得到text feature； text prompt：（320,77,768）；text features：（32,10,768） todo 有两次text encoder调用，nc代表什么？
+            text_features = self.text_encoder(text_prompt, tokenized_prompts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            text_features = text_features.view(image_features.shape[0], self.n_class, -1)
+
+            image_features = image_features.unsqueeze(1)
+            logit_scale = self.logit_scale.exp()
+            logits = logit_scale * (image_features * text_features).sum(-1)
+            #nc与loss_m有关  nc_prompts（10,77,768），nc_text_features（10,768）
+            nc_text_features = self.text_encoder(nc_prompts, nc_tokenized_prompts)
+            nc_text_features = nc_text_features / nc_text_features.norm(dim=-1, keepdim=True)
+            #dis（10,10）
+            dis = nc_text_features @ nc_text_features.permute(1, 0)
+            # torch.eye(bool)：对角为True，其余为False；  ~：对数据的每个二进制位取反
+            loss_m = dis[~torch.eye(self.args.num_prompt, dtype=torch.bool, device='cuda')].abs().mean()
+
+            return logits, image_features, chosen_keys, loss_m
+
+    @property
+    def dtype(self):
+        return self.image_encoder.conv1.weight.dtype
