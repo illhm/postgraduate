@@ -114,12 +114,13 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
     if name in _MODELS:
         model_path = _download(_MODELS[name], download_root or os.path.expanduser("~/.cache/clip"))
     elif os.path.isfile(name):
+        # 1.
         model_path = name 
     else:
         raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
         
     try:
-        # loading JIT archive
+        # 2. loading JIT archive
         model = torch.jit.load(model_path, map_location=device if jit else "cpu").eval()
         state_dict = None
     except RuntimeError:
@@ -130,6 +131,7 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
         state_dict = torch.load(model_path, map_location="cpu")
 
     if not jit:
+        # 3.
         model = build_model(state_dict or model.state_dict()).to(device)
         if str(device) == "cpu":
             model.float()
@@ -365,7 +367,7 @@ class CLIP(nn.Module):
         self.n_class = len(class_names)
         self.args = args
 
-        # 1. 实例化 text enoder
+        """ 1. text encoder在这里实现 """
         self.text_encoder = TextEncoder(clip_model)
         if torch.cuda.device_count() > 1:
             self.text_encoder = nn.DataParallel(self.text_encoder)
@@ -410,7 +412,7 @@ class CLIP(nn.Module):
             _, indexs = probability.topk(k=min(self.args.text_prompt, probability.shape[1]), dim=1, largest=True)
             # 3.3 取出匹配的k个key
             chosen_keys = self.text_key[indexs]
-            # 3.4 这里和prompt_learner交互，把选中的prompt的index传进去，
+            # 3.4 这里执行prompt_learner的forward方法，把选中的prompt的index传进去，
             text_prompt, tokenized_prompts, nc_prompts, nc_tokenized_prompts = self.prompt_learner(indexs)
 
             # 3.5 将text送入 text encoder,得到text feature； text prompt：（320,77,768）；text features：（32,10,768） todo 有两次text encoder调用，nc代表什么？
@@ -421,11 +423,12 @@ class CLIP(nn.Module):
             image_features = image_features.unsqueeze(1)
             logit_scale = self.logit_scale.exp()
             logits = logit_scale * (image_features * text_features).sum(-1)
-            #nc与loss_m有关  nc_prompts（10,77,768），nc_text_features（10,768）
-            nc_text_features = self.text_encoder(nc_prompts, nc_tokenized_prompts)
-            nc_text_features = nc_text_features / nc_text_features.norm(dim=-1, keepdim=True)
+
+            #loss_m是正交损失，它是对text prompt经过text encoder得到的embedding来计算正交距离的；       nc_prompts（10,77,768），nc_text_features（10,768）
+            prompt_embeddings = self.text_encoder(nc_prompts, nc_tokenized_prompts)
+            prompt_embeddings = prompt_embeddings / prompt_embeddings.norm(dim=-1, keepdim=True)
             #dis（10,10）
-            dis = nc_text_features @ nc_text_features.permute(1, 0)
+            dis = prompt_embeddings @ prompt_embeddings.permute(1, 0)
             # torch.eye(bool)：对角为True，其余为False；  ~：对数据的每个二进制位取反
             loss_m = dis[~torch.eye(self.args.num_prompt, dtype=torch.bool, device='cuda')].abs().mean()
 

@@ -1,4 +1,4 @@
-from clip import clip
+from clip import CLIP as clip
 import torch
 from torch import nn
 import os.path as osp

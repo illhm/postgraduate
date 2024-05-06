@@ -122,8 +122,10 @@ class IncrementalDataset:
 
     def new_task(self):
         print("current_task：{},class_num：{}".format(self._current_task,self.increments[self._current_task]))
+        # 1. 获取本task中的class的序号范围
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
+        # 2. 根据序号范围获取class名称
         train_class_names = self.class_names[min_class:max_class]
         test_class_names = self.class_names[:max_class]
         # todo list(range(min_class, max_class))->[order[i] for in range(min_class, max_class)]

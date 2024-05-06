@@ -162,12 +162,14 @@ class QuickGELU(nn.Module):
     def forward(self, x: torch.Tensor):
         return x * torch.sigmoid(1.702 * x)
 
-
+# from attention import MultiheadAttention
+# hpt的Attention部分的修改在这里实现
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
+        # self.attn = MultiheadAttention(d_model, n_head)# 使用HPT的MSA
         self.ln_1 = LayerNorm(d_model)
         self.mlp = nn.Sequential(OrderedDict([
             ("c_fc",nn.Linear(d_model, d_model * 4)),
@@ -246,7 +248,7 @@ class VisionTransformer(nn.Module):
         return x
 
 
-class CLIP(nn.Module):
+class Original_CLIP(nn.Module):
     def __init__(self,
             embed_dim:int,
             #vision
@@ -428,7 +430,7 @@ def build_model(state_dict: dict):
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
 
-    model = CLIP(
+    model = Original_CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
         context_length, vocab_size, transformer_width, transformer_heads, transformer_layers

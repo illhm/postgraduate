@@ -91,7 +91,7 @@ def main(args):
         print('prompt trained from random')
     # 2.2 在CoOp模型基础上进行定制
     if args.model == 'coop':
-        model = CoOp(prev_key, prev_prompt, args=args, keep=args.keep)
+        algorithm = CoOp(prev_key, prev_prompt, args=args, keep=args.keep)
 
     start_task = args.start_task
     memory = None
@@ -111,16 +111,16 @@ def main(args):
         print("sample_per_task_testing",inc_dataset.sample_per_task_testing)  # dict{task:len(test)}
 
         # 3.3 增量task数据送入模型开始增量训练
-        model.fit(train_loader, train_classnames, task_info)
+        algorithm.fit(train_loader, train_classnames, task_info)
 
         # 3.4 保存训练模型及（key，prompt）等运行结果
         if not os.path.isdir(args.save_path):
             mkdir_p(args.save_path)
         np.save(args.save_path + "/seed.txt", args.seed)
-        torch.save(model.model.state_dict()['text_key'], os.path.join(args.save_path, 'text_key.pth.tar'))
-        torch.save(model.model.prompt_learner.state_dict()['text_prompt'],
+        torch.save(algorithm.model.state_dict()['text_key'], os.path.join(args.save_path, 'text_key.pth.tar'))
+        torch.save(algorithm.model.prompt_learner.state_dict()['text_prompt'],
                    os.path.join(args.save_path, 'text_prompt.pth.tar'))
-        acc = model.accuracy(test_loader, args.num_test, test_classnames, mean_per_class=args.mean_per_class)
+        acc = algorithm.accuracy(test_loader, args.num_test, test_classnames, mean_per_class=args.mean_per_class)
         print('acc', acc)
         # 3.4 运行数据指标保存
         with open(args.save_path + "/memory_" + str(args.current_task) + ".pickle", 'wb') as handle:

@@ -55,7 +55,7 @@ class CoOp:
         # 这里代表每个epoch中有多少batch
         per_epoch_steps = len(data_loader)
         """ 1. 在这里将text key和prompt放入clip模型中"""
-        self.init_self_model(class_names=class_names, per_epoch_steps=per_epoch_steps, text_key=self.text_key,
+        self.init_clip_model(class_names=class_names, per_epoch_steps=per_epoch_steps, text_key=self.text_key,
                              text_prompt=self.text_prompt)
         self.model.eval()
         # 2. train过程，计算CE损失，匹配损失和正交损失
@@ -91,7 +91,7 @@ class CoOp:
             print("epoch:{}, train_accuracy={}, average_loss={}".format(epoch, float(total_match) / float(total_num),
                                                                         float(total_loss) / float(idx + 1)))
 
-    def init_self_model(self, class_names, per_epoch_steps, text_key, text_prompt):
+    def init_clip_model(self, class_names, per_epoch_steps, text_key, text_prompt):
 
         self.n_class = len(class_names)
         # 通过深拷贝clip模型，实现clip主体参数的冻结，只训练key和prompt
