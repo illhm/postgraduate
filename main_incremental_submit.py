@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 import argparse
 import pickle
 import random
@@ -15,7 +15,6 @@ def parse_option():
     parser = argparse.ArgumentParser('Prompt Learning for CLIP', add_help=False)
 
     parser.add_argument("--root", type=str, default='/home/qc/dataset', help='parent path of dataset')
-    parser.add_argument("--db_name", type=str, default='Caltech101', help='dataset name')
     parser.add_argument("--mean_per_class", action='store_true', help='mean_per_class')
     parser.add_argument("--num_runs", type=int, default=10, help='num_runs')
     parser.add_argument("--seed", type=int, default=0, help='random seed')
@@ -26,8 +25,8 @@ def parse_option():
     parser.add_argument("--output-dir", type=str, default="/home/qc/AttriCLIP-main/result", help="log output directory")
     parser.add_argument("--use_cuda", type=bool, default=True)
 
-    parser.add_argument("--backbone_path", type=str, default='/home/qc/pretrained_model/ViT-L-14.pt', help='path of backbone model file')
     parser.add_argument("--backbone", type=str, default='ViT-L/14', help='path of backbone model file')
+    parser.add_argument("--backbone_path", type=str, default='/home/qc/pretrained_model/ViT-L-14.pt', help='path of backbone model file')
     parser.add_argument("--keyprompt_path", type=str, default=None, help='path of keyprompt file')
     parser.add_argument("--save_path", type=str, default='/home/qc/AttriCLIP-main/result', help='path to save run results')
     parser.add_argument("--ID", type=str, default='description', help='description')
@@ -53,11 +52,14 @@ def parse_option():
     parser.add_argument("--memory", type=int, default=0, help='memory')
     parser.add_argument("--num_test", type=int, default=15, help='num_test_text')
     parser.add_argument("--num_prompt", type=int, default=10, help='num_prompt')
+    parser.add_argument("--v_prompt_length", type=int, default=10, help='prompt length')
+    parser.add_argument("--t_prompt_length", type=int, default=10, help='prompt length')
+
     parser.add_argument("--text_prompt", type=int, default=3, help='text_prompt')
     parser.add_argument("--keep", type=bool, default=False, help='keep')  # continue from other datasets
 
     args, unparsed = parser.parse_known_args()
-    args.save_path = args.save_path + '/' + args.db_name + '/' + args.ID
+    args.save_path = args.save_path + '/' + args.dataset + '/' + args.ID
 
     return args
 
@@ -70,31 +72,29 @@ def setup_seed(seed):
 
 def main(args):
     # 1. 读取数据集，设置为增量形式
-    inc_dataset = incremental_dataloader.IncrementalDataset( args=args, random_order=False,
+    inc_dataset = incremental_dataloader.IncrementalDataset(args=args, random_order=False,
                                                             # random class
-                                                            shuffle=True, seed=args.seed, batch_size=args.train_batch,
-                                                            workers=8, validation_split=0,
-                                                            #increment，增量步长
-                                                            increment=args.class_per_task, )
+                                                            shuffle=True, seed=args.seed, workers=8, validation_split=0, )
     # 2. 加载训练模型
     # 2.1 是否使用预训练的（key，prompt）
     prev_key, prev_prompt = False, False
     setup_seed(args.seed)
-    if args.keep == True:
+    if args.keep:
         # 之前训练的结果
         path_key = os.path.join(args.keyprompt_path, 'text_key.pth.tar')
         path_prompt = os.path.join(args.keyprompt_path, 'text_prompt.pth.tar')
         prev_key = torch.load(path_key)
         prev_prompt = torch.load(path_prompt)
-        print('prompt trained from previous dataset')
+        print('init prompt trained from previous dataset')
     else:
-        print('prompt trained from random')
-    # 2.2 在CoOp模型基础上进行定制
+        print('init prompt from random')
+    # 2.2 加载CoOp算法模型
     if args.model == 'coop':
-        algorithm = CoOp(prev_key, prev_prompt, args=args, keep=args.keep)
+        algorithm = CoOp(prev_key, prev_prompt, args, inc_dataset)
 
     start_task = args.start_task
     memory = None
+
     # 3. 开始训练过程
     for task in range(start_task, args.num_task):
         # 3.1 获取增量任务及增量数据
@@ -106,14 +106,14 @@ def main(args):
                 sample_per_task_testing = pickle.load(handle)
             inc_dataset.sample_per_task_testing = sample_per_task_testing
 
-        # 打印训练参数
+        # 3.3 打印训练参数
         print('task {} start to fit, taskInfo:{}'.format(task,str(task_info)))
         print("sample_per_task_testing",inc_dataset.sample_per_task_testing)  # dict{task:len(test)}
 
-        # 3.3 增量task数据送入模型开始增量训练
-        algorithm.fit(train_loader, train_classnames, task_info)
+        # 3.4 增量task数据送入模型开始增量训练
+        algorithm.train(train_loader, train_classnames, task_info)
 
-        # 3.4 保存训练模型及（key，prompt）等运行结果
+        # 3.5 保存训练模型及（key，prompt）等运行结果
         if not os.path.isdir(args.save_path):
             mkdir_p(args.save_path)
         np.save(args.save_path + "/seed.txt", args.seed)
@@ -122,7 +122,7 @@ def main(args):
                    os.path.join(args.save_path, 'text_prompt.pth.tar'))
         acc = algorithm.accuracy(test_loader, args.num_test, test_classnames, mean_per_class=args.mean_per_class)
         print('acc', acc)
-        # 3.4 运行数据指标保存
+        # 3.6 运行数据指标保存
         with open(args.save_path + "/memory_" + str(args.current_task) + ".pickle", 'wb') as handle:
             pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
         with open(args.save_path + "/acc_task_" + str(args.current_task) + ".pickle", 'wb') as handle:
@@ -132,5 +132,7 @@ def main(args):
 
 
 if __name__ == '__main__':
+    if torch.cuda.is_available():
+        print("gpunum={}".format(torch.cuda.device_count()))
     args = parse_option()
     main(args)

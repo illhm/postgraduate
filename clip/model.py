@@ -5,7 +5,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-
+#同一包内出现找不到module的情况时，在module前面加上.
+from .attention import MultiheadAttention
+#这个model.py是hpt的
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -168,8 +170,8 @@ class ResidualAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
         super().__init__()
 
-        self.attn = nn.MultiheadAttention(d_model, n_head)
-        # self.attn = MultiheadAttention(d_model, n_head)# 使用HPT的MSA
+        # self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.attn = MultiheadAttention(d_model, n_head)# 使用HPT的MSA
         self.ln_1 = LayerNorm(d_model)
         self.mlp = nn.Sequential(OrderedDict([
             ("c_fc",nn.Linear(d_model, d_model * 4)),

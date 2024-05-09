@@ -63,12 +63,13 @@ class SplitCaltech():
             train, val, test = read_split(self.split_path, self.folders_dir)
         else:
             train, val, test = read_and_split_data(self.folders_dir, ignored=IGNORED,new_cnames=NEW_CNAMES)
+            # 分割后保存到文件中
             save_split(train, val, test, self.split_path, self.folders_dir)
 
         self.train_set, self.val, self.test_set = MyDataset(train), MyDataset(val), MyDataset(test)
         self._lab2cname, self._classnames = get_lab2cname(train)
 
-    def getTrainTest_Dataset(self):
+    def getTrainTestEval_Dataset(self):
         return self.train_set, self.test_set, self.val
 
     def get_class_names(self):

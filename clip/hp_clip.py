@@ -1,14 +1,15 @@
-from clip import CLIP as clip
+import clip.clip as clip
 import torch
 from torch import nn
 import os.path as osp
 import json
 import random
 import os
+from gpt_generation import description,structure
 
-AVAI_SCHEDS=[]
-"""加载 指定name的 原生clip模型"""
-def load_clip_to_cpu(args, device):
+
+"""加载 指定name的 原生clip模型,load_clip_to_cpu方法是hpt的"""
+def load_clip_to_cpu(args):
     backbone_name = args.backbone
     url = clip._MODELS[backbone_name]
     # 1.有模型文件就用，没有就下载
@@ -26,7 +27,73 @@ def load_clip_to_cpu(args, device):
     model = clip.build_model(state_dict or model.state_dict())
     return model
 
+class TextEncoderZS(nn.Module):
+    """ path 1：frozen text encoder"""
+    def __init__(self, cfg, clip_model):
+        super().__init__()
+        self.transformer = clip_model.transformer.resblocks
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
+        self.token_embedding = clip_model.token_embedding
+
+    def forward(self, text):
+        x = self.token_embedding(text).type(self.dtype)
+        x = x + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+
+        feats = []
+        for _, layer in enumerate(self.transformer):
+            x = layer(x)
+            # save class embeddings from different layers
+            feats.append(x[text.argmax(dim=-1), torch.arange(x.shape[1])])
+
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x)
+        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        txt_feats = torch.stack(feats)
+
+        return x, txt_feats
+
+class VisionPromptLearner(nn.Module):
+    """path 1：prompt learner for image encoder"""
+    def __init__(self, args, clip_model):
+        super().__init__()
+        self.n_vpro = args.v_prompt_length
+        self.pro_dim = clip_model.visual.ln_pre.weight.shape[0]
+        self.dtype = clip_model.dtype
+        self.conv1 = clip_model.visual.conv1
+        self.class_embedding = clip_model.visual.class_embedding
+        self.positional_embedding = clip_model.visual.positional_embedding
+        self.layers = len(clip_model.visual.transformer.resblocks)
+        # global prompt for image encoder (except for the first layer)
+        self.p_visual = nn.ParameterList([nn.Parameter(torch.empty(self.n_vpro, self.pro_dim).type(self.dtype))
+                                          for _ in range(self.layers - 1)]).cuda()
+        for p in self.p_visual:
+            nn.init.normal_(p, std=0.02)
+
+        # global prompt for the first layer of image encoder
+        self.p_input = nn.Parameter(torch.empty(self.n_vpro, self.pro_dim)).cuda()
+        nn.init.normal_(self.p_input, std=0.02)
+
+    def forward(self, x):
+        x = x.type(self.dtype)
+        x = self.conv1(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1)
+        x = x.permute(0, 2, 1)
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1],
+                                                                      dtype=x.dtype, device=x.device), x], dim=1)
+        x = x + self.positional_embedding.to(x.dtype)
+
+        # insert global visual prompt of the first layer
+        p_input = self.p_input.unsqueeze(0).expand(len(x), -1, -1)
+        x = torch.cat([x, p_input], dim=1)
+
+        return x, self.p_visual
+
 class VisionEncoder(nn.Module):
+    """path 1：prompted image encoder"""
     def __init__(self, args, clip_model):
         super().__init__()
         visual = clip_model.visual
@@ -53,42 +120,43 @@ class VisionEncoder(nn.Module):
 
         return x
 
-class VisionPromptLearner(nn.Module):
-    def __init__(self, args, clip_model):
+class VisionEncoderZS(nn.Module):
+    """ path 2：frozen image encoder """
+    def __init__(self, cfg, clip_model):
         super().__init__()
-        self.n_vpro = args.v_prompt_length
-        self.pro_dim = clip_model.visual.ln_pre.weight.shape[0]
+
+        visual = clip_model.visual
+        self.ln_pre = visual.ln_pre
+        self.transformer = visual.transformer.resblocks
+        self.ln_post = visual.ln_post
+        self.proj = visual.proj
         self.dtype = clip_model.dtype
         self.conv1 = clip_model.visual.conv1
         self.class_embedding = clip_model.visual.class_embedding
         self.positional_embedding = clip_model.visual.positional_embedding
-        self.layers = len(clip_model.visual.transformer.resblocks)
-        # global prompt for image encoder (except for the first layer)
-        self.p_visual = nn.ParameterList([nn.Parameter(torch.empty(self.n_vpro, self.pro_dim).type(self.dtype))
-                                          for _ in range(self.layers - 1)])
-        for p in self.p_visual:
-            nn.init.normal_(p, std=0.02)
-
-        # global prompt for the first layer of image encoder
-        self.p_input = nn.Parameter(torch.empty(self.n_vpro, self.pro_dim))
-        nn.init.normal_(self.p_input, std=0.02)
 
     def forward(self, x):
-        x = x.type(self.dtype)
         x = self.conv1(x)
         x = x.reshape(x.shape[0], x.shape[1], -1)
         x = x.permute(0, 2, 1)
-        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1],
-                                                                      dtype=x.dtype, device=x.device), x], dim=1)
+
+        x = torch.cat(
+            [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
+             x], dim=1)
         x = x + self.positional_embedding.to(x.dtype)
+        x = self.ln_pre(x).type(self.dtype)
+        x = x.permute(1, 0, 2)
 
-        # insert global visual prompt of the first layer
-        p_input = self.p_input.unsqueeze(0).expand(len(x), -1, -1)
-        x = torch.cat([x, p_input], dim=1)
+        x = self.transformer(x)
 
-        return x, self.p_visual
+        x = x.permute(1, 0, 2)
+        x = self.ln_post(x[:, 0, :])
+        x = x @ self.proj
+
+        return x
 
 class TextEncoder(nn.Module):
+    """ path 2：Hierachical Prompted Text Encoder"""
     def __init__(self, args, clip_model):
         super().__init__()
         self.transformer = clip_model.transformer.resblocks
@@ -99,21 +167,21 @@ class TextEncoder(nn.Module):
         self.n_tpro = args.t_prompt_length  # prompt length
         self.n_set = args.description_num  # number of descriptions for each category
 
-    def forward(self, x, p_ins, p_uni, tokenized_prompts, attn, flag):
-        # p_ins: instance-specific prompt, a.k.a high-level prompt from descriptions
-        # p_uni: task-unified prompt, a.k.a global-level prompt
+    def forward(self, x, high_prompt, global_prompt, tokenized_prompts, attn, flag):
+        # prompt_high——p_ins: instance-specific prompt, a.k.a high-level prompt from descriptions
+        # prompt_global——p_uni: task-unified prompt, a.k.a global-level prompt
         # flag: True when training and False when testing
         # Since we use all (self.n_set) descriptions for learning high-level prompt, we should reshape p_ins first.
-        (l, c, d) = p_ins.shape
-        p_ins = p_ins.reshape(l, c // self.n_set, self.n_set, d)  # (L, C, n_set, D)
+        (l, c, d) = high_prompt.shape
+        high_prompt = high_prompt.reshape(l, c // self.n_set, self.n_set, d)  # (L, C, n_set, D)
 
         # During evaluation, we leverage all (n_set) structures according to descriptions for modeling one category (N*C*n_set steps in total), 
         # instead of randomly picking one structure for each category (N*C steps in one epoch). 
         if not flag:
-            p_ins = p_ins.unsqueeze(2).expand(-1, -1, self.n_set, -1, -1)
-            p_ins = torch.flatten(p_ins, 1, 2)  # (L, C*n_set, n_set, D)
+            high_prompt = high_prompt.unsqueeze(2).expand(-1, -1, self.n_set, -1, -1)
+            high_prompt = torch.flatten(high_prompt, 1, 2)  # (L, C*n_set, n_set, D)
 
-        p_ins = p_ins.permute(0, 2, 1, 3).type(self.dtype)
+        high_prompt = high_prompt.permute(0, 2, 1, 3).type(self.dtype)
         x = (x + self.positional_embedding).type(self.dtype)
         x = x.permute(1, 0, 2)
 
@@ -123,10 +191,10 @@ class TextEncoder(nn.Module):
                 suffix = x[1 + self.n_tpro + self.n_set:]
 
                 # global-level prompt
-                ctx_g = p_uni[layer_idx - 1].unsqueeze(1).expand(self.n_tpro, prefix.shape[1], -1)
+                ctx_g = global_prompt[layer_idx - 1].unsqueeze(1).expand(self.n_tpro, prefix.shape[1], -1)
 
                 # high-level prompt
-                ctx_h = p_ins[layer_idx - 1]
+                ctx_h = high_prompt[layer_idx - 1]
                 x = torch.cat([prefix, ctx_g, ctx_h, suffix], dim=0)
 
                 # 'attn' is attention matrix from topological prompt learner, 
@@ -147,18 +215,19 @@ class TextEncoder(nn.Module):
         return x
 
 class PromptLearner(nn.Module):
+    """path 2：global prompt learner for Hierachical text encoder"""
     def __init__(self, args, classnames, info_topo, clip_model):
         super().__init__()
         self.n_set = args.description_num  # number of descriptions for each category
-        self.n_tpro = args.prompt_length  # prompt length
+        self.n_tpro = args.t_prompt_length  # prompt length
         self.dtype = clip_model.dtype
         self.ctx_dim = clip_model.ln_final.weight.shape[0]
         self.layers = len(clip_model.transformer.resblocks)
 
-        # global prompt for text encoder (except for the first layer)
-        self.p_uni = nn.ParameterList([nn.Parameter(torch.empty(self.n_tpro, self.ctx_dim).type(self.dtype))
-                                       for _ in range(self.layers - 1)])
-        for p in self.p_uni:
+        # 初始化global prompt， global prompt for text encoder (except for the first layer)
+        self.global_prompt = nn.ParameterList([nn.Parameter(torch.empty(self.n_tpro, self.ctx_dim).type(self.dtype))
+                                               for _ in range(self.layers - 1)])
+        for p in self.global_prompt:
             nn.init.normal_(p, std=0.02)
 
         # projector for learning high-level prompt (a.k.a p_ins)
@@ -174,13 +243,14 @@ class PromptLearner(nn.Module):
         self.clip_model = clip_model
 
     def forward(self, feats, attns, flag):
-        p_uni = self.p_uni
+        p_uni = self.global_prompt
         prompts, attn = [], []
         prompt_prefix = " ".join(["X"] * (self.n_tpro + self.n_set))
 
         if flag:
             for name in self.classnames:
-                # For efficiency, we randomly pick one structure as a part of input during training, 
+                # 随机选择一个structure，而使用所有的class descriptions
+                # For efficiency, we randomly pick one structure as a part of input during training,
                 # while leveraging all descriptions of the category for learning high-level prompt.
                 id = random.randint(0, self.n_set - 1)
                 topo = self.info_topo[name][id]
@@ -223,69 +293,8 @@ class PromptLearner(nn.Module):
 
         return p_ori, p_ins, p_uni, attn
 
-class TextEncoderZS(nn.Module):
-    def __init__(self, cfg, clip_model):
-        super().__init__()
-        self.transformer = clip_model.transformer.resblocks
-        self.positional_embedding = clip_model.positional_embedding
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
-        self.token_embedding = clip_model.token_embedding
-
-    def forward(self, text):
-        x = self.token_embedding(text).type(self.dtype)
-        x = x + self.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)
-
-        feats = []
-        for _, layer in enumerate(self.transformer):
-            x = layer(x)
-            # save class embeddings from different layers
-            feats.append(x[text.argmax(dim=-1), torch.arange(x.shape[1])])
-
-        x = x.permute(1, 0, 2)
-        x = self.ln_final(x)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
-        txt_feats = torch.stack(feats)
-
-        return x, txt_feats
-
-class VisionEncoderZS(nn.Module):
-    def __init__(self, cfg, clip_model):
-        super().__init__()
-
-        visual = clip_model.visual
-        self.ln_pre = visual.ln_pre
-        self.transformer = visual.transformer.resblocks
-        self.ln_post = visual.ln_post
-        self.proj = visual.proj
-        self.dtype = clip_model.dtype
-        self.conv1 = clip_model.visual.conv1
-        self.class_embedding = clip_model.visual.class_embedding
-        self.positional_embedding = clip_model.visual.positional_embedding
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = x.reshape(x.shape[0], x.shape[1], -1)
-        x = x.permute(0, 2, 1)
-
-        x = torch.cat(
-            [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
-             x], dim=1)
-        x = x + self.positional_embedding.to(x.dtype)
-        x = self.ln_pre(x).type(self.dtype)
-        x = x.permute(1, 0, 2)
-
-        x = self.transformer(x)
-
-        x = x.permute(1, 0, 2)
-        x = self.ln_post(x[:, 0, :])
-        x = x @ self.proj
-
-        return x
-
 class TopoPromptLearner(nn.Module):
+    """path 2：global prompt learner """
     def __init__(self, args, classnames, prompt_topo, clip_model):
         super().__init__()
 
@@ -392,12 +401,8 @@ class CustomCLIP(nn.Module):
             p.requires_grad = False
 
         # 加载description和structure内容
-        f_json = osp.join(args.gpt_dir + '/description', args.dataset + '.json')
-        f_topo = osp.join(args.gpt_dir + '/structure', args.dataset + '.json')
-        with open(f_json, 'r') as f:
-            text_prompts = json.load(f)
-        with open(f_topo, 'r') as f:
-            text_topos = json.load(f)
+        text_prompts = description.get_All_Descriptions(args)
+        text_topos = structure.get_All_Structures(args)
 
         classnames = [name.replace("_", " ") for name in classnames]
         self.topo_prompt_learner = TopoPromptLearner(args, classnames, text_topos, clip_model)
@@ -406,8 +411,15 @@ class CustomCLIP(nn.Module):
 
         self.image_encoder = VisionEncoder(args, clip_model)
         self.text_encoder = TextEncoder(args, clip_model)
+
+        # self.model.to(torch.device("cuda"))
         self.text_encoder_zs = TextEncoderZS(args, clip_model)
         self.image_encoder_zs = VisionEncoderZS(args, clip_model)
+        if torch.cuda.device_count() > 1:
+            self.image_encoder = nn.DataParallel(self.image_encoder)
+            self.text_encoder = nn.DataParallel(self.text_encoder)
+            self.text_encoder_zs = nn.DataParallel(self.text_encoder_zs)
+            self.image_encoder_zs = nn.DataParallel(self.image_encoder_zs)
 
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
@@ -425,40 +437,41 @@ class CustomCLIP(nn.Module):
                 class_embedding = class_embeddings.mean(dim=0)
                 class_embedding /= class_embedding.norm()
                 features /= features.norm(dim=-1, keepdim=True)
-                # 收集每个类别的feature和class embedding
                 zs_feats.append(features)
                 zs_repres.append(class_embedding)
-            self.text_features_zs = torch.stack(zs_repres, dim=1).cuda()
+            #todo
             self.text_features_ft = torch.stack(zs_feats, dim=1).cuda()
+            self.text_features_zs = torch.stack(zs_repres, dim=1).cuda()
 
     def forward(self, image):
-        logit_scale = self.logit_scale.exp()
-
+        # 1. path 1
+        # 1.1 prompt image encoder image feature
+        x, p_visual = self.vision_prompt_learner(image)
+        image_features = self.image_encoder(x, p_visual)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        # 1.2 frozen text encoder text feature
         text_features_zs = self.text_features_zs
+
+        # 2. path 2
+        # 2.1 frozen image encoder image feature
         image_features_zs = self.image_encoder_zs(image.type(self.dtype))
         image_features_zs = image_features_zs / image_features_zs.norm(dim=-1, keepdim=True)
-
+        # 2.2 Hierachical text encoder text feature
         attns = self.topo_prompt_learner()
-        p_ori, p_ins, p_uni, attns = self.prompt_learner(self.text_features_ft, attns, self.training)
-
+        p_ori, high_prompt, global_prompt, attns = self.prompt_learner(self.text_features_ft, attns, self.training)
         tokenized_prompts = self.prompt_learner.tokenized_prompts
-        text_features = self.text_encoder(p_ori, p_ins, p_uni, tokenized_prompts, attns, self.training)
+        text_features = self.text_encoder(p_ori, high_prompt, global_prompt, tokenized_prompts, attns, self.training)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
         # Since we use multiple structures for producing representations of one category,
         # we should take their mean value as the final representation.
         if not self.training:
             text_features = text_features.mean(dim=1)
-
-        x, p_visual = self.vision_prompt_learner(image)
-        image_features = self.image_encoder(x, p_visual)
-
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         # asymmetric loss
         #logits_i由prompt image encoder和frozen text encoder得到
         #logits_t由frozen image encoder和Hierachical prompt text encoder得到
+        logit_scale = self.logit_scale.exp()
         logits_i = logit_scale * (image_features @ text_features_zs)
         logits_t = logit_scale * (image_features_zs @ text_features.t())
         logits = (logits_i + logits_t) / 2
@@ -467,135 +480,3 @@ class CustomCLIP(nn.Module):
             return logits, logits_i, logits_t
         else:
             return logits
-
-class HP_CLIP(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        print("HP_CLIP init")
-
-    def get_model(self, args, classnames):
-        print(f"Loading CLIP (backbone: {args.backbone})")
-        # 1. 加载原生CLIP模型，如vit-B/16
-        clip_model = load_clip_to_cpu(args).cuda()
-
-        print("Building custom CLIP")
-        # 2. 进行CLIP改造，
-        self.model = CustomCLIP(args, classnames, clip_model)
-        
-        return self.model
-    
-    def get_optimizer(self, args, param_groups):
-        optim = args.NAME
-        lr = args.LR
-        weight_decay = args.WEIGHT_DECAY
-        momentum = args.MOMENTUM
-        sgd_dampening = args.SGD_DAMPNING
-        sgd_nesterov = args.SGD_NESTEROV
-        rmsprop_alpha = args.RMSPROP_ALPHA
-        adam_beta1 = args.ADAM_BETA1
-        adam_beta2 = args.ADAM_BETA2
-        staged_lr = args.STAGED_LR
-        new_layers = args.NEW_LAYERS
-        base_lr_mult = args.BASE_LR_MULT
-        
-        if optim == "adam":
-            optimizer = torch.optim.Adam(
-                param_groups,
-                lr=lr,
-                weight_decay=weight_decay,
-                betas=(adam_beta1, adam_beta2),
-            )
-
-        elif optim == "amsgrad":
-            optimizer = torch.optim.Adam(
-                param_groups,
-                lr=lr,
-                weight_decay=weight_decay,
-                betas=(adam_beta1, adam_beta2),
-                amsgrad=True,
-            )
-
-        elif optim == "sgd":
-            optimizer = torch.optim.SGD(
-                param_groups,
-                lr=lr,
-                momentum=momentum,
-                weight_decay=weight_decay,
-                dampening=sgd_dampening,
-                nesterov=sgd_nesterov,
-            )
-
-        elif optim == "rmsprop":
-            optimizer = torch.optim.RMSprop(
-                param_groups,
-                lr=lr,
-                momentum=momentum,
-                weight_decay=weight_decay,
-                alpha=rmsprop_alpha,
-            )
-
-        elif optim == "adamw":
-            optimizer = torch.optim.AdamW(
-                param_groups,
-                lr=lr,
-                weight_decay=weight_decay,
-                betas=(adam_beta1, adam_beta2),
-            )
-        else:
-            raise NotImplementedError(f"Optimizer {optim} not implemented yet!")
-
-        return optimizer
-
-    def build_lr_scheduler(self,optimizer,args):
-        """A function wrapper for building a learning rate scheduler.
-
-        Args:
-            optimizer (Optimizer): an Optimizer.
-            args (argsNode): optimization config.
-        """
-        lr_scheduler = args.LR_SCHEDULER
-        stepsize = args.STEPSIZE
-        gamma = args.GAMMA
-        max_epoch = args.MAX_EPOCH
-
-        if lr_scheduler not in AVAI_SCHEDS:
-            raise ValueError(
-                f"scheduler must be one of {AVAI_SCHEDS}, but got {lr_scheduler}"
-            )
-
-        if lr_scheduler == "single_step":
-            if isinstance(stepsize, (list, tuple)):
-                stepsize = stepsize[-1]
-
-            if not isinstance(stepsize, int):
-                raise TypeError(
-                    "For single_step lr_scheduler, stepsize must "
-                    f"be an integer, but got {type(stepsize)}"
-                )
-
-            if stepsize <= 0:
-                stepsize = max_epoch
-
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer, step_size=stepsize, gamma=gamma
-            )
-
-        elif lr_scheduler == "multi_step":
-            if not isinstance(stepsize, (list, tuple)):
-                raise TypeError(
-                    "For multi_step lr_scheduler, stepsize must "
-                    f"be a list, but got {type(stepsize)}"
-                )
-
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                optimizer, milestones=stepsize, gamma=gamma
-            )
-
-        elif lr_scheduler == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                # optimizer, float(max_epoch)
-                optimizer, max_epoch
-            )
-
-        return scheduler

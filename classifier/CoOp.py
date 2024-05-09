@@ -4,15 +4,17 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from tqdm import tqdm
-from clip.clip import load, tokenize, CLIP
+from clip.clip import load_and_build_clip, tokenize, CLIP
 from .utils import build_cosine_scheduler, cosine_loss
+from clip import hp_clip
+from clip.hp_clip import CustomCLIP
 
 class CoOp:
-    def __init__(self, prev_key, prev_prompt, args, n_ctx=12, use_float32=False, use_grad_checkpoint=False, keep=False):
-        # 1. 从指定路径加载clip模型
-        clip_model, _ = load(args.backbone_path)  # 1.1 这一句是Attriclip中的，单纯加载clip模型，没有做特殊结构改动
-        # clip_model= hp_clip.load_clip(args=args,device=device)     # 1.2 这一句是HPT中的，
-        # 1.1 将模型设置为Evaluation模式
+    def __init__(self, prev_key, prev_prompt, args, loaded_dataset, n_ctx=12, use_float32=False, use_grad_checkpoint=False):
+        # 1. attriclip的load，从指定路径加载clip模型，并进行特定修改
+        clip_model, _ = load_and_build_clip(args.backbone_path)
+        # clip_model= hp_clip.load_clip_to_cpu(args=args).to(torch.device("cuda"))     # 1.2 这一句是HPT中的，
+        # 1.1 将模型设置为Evaluation模式，和model.train()相对应，这对于某些特定类型的层是非常重要的，比如 BatchNorm 和 Dropout 层，它们在训练和评估阶段的行为是不同的
         clip_model.eval()
         if use_float32:
             clip_model.float()
@@ -20,6 +22,7 @@ class CoOp:
         self.use_grad_checkpoint = use_grad_checkpoint
         self.num_prompt = args.num_prompt
         self.n_ctx = n_ctx
+        # 学习率为什么这样设置
         self.lr = args.lr * args.train_batch / 20
         self.wd = args.wd
         self.epochs = args.epochs
@@ -30,13 +33,14 @@ class CoOp:
 
         # 2. Attribute Word Bank初始化
         ctx_dim = clip_model.ln_final.weight.shape[0]
-        # key 和 prompt 向量从正态分布中取值来进行初始化
+        # 2.1 key 和 prompt 向量先初始化为0 tensor
         text_key = torch.empty(self.num_prompt, ctx_dim, dtype=self.dtype).cuda()
-        nn.init.normal_(text_key, std=0.02)  # 从正态分布中取值，来初始化神经网络层的权重
+        # 2.2 从正态分布中取值，来初始化神经网络层的权重
+        nn.init.normal_(text_key, std=0.02)
         text_prompt = torch.empty(self.num_prompt, n_ctx, ctx_dim, dtype=self.dtype).cuda()
         nn.init.normal_(text_prompt, std=0.02)
-        # 2.1  key和prompt只是可学习的网络参数
-        if keep == True:
+        # 2.3  key和prompt只是可学习的网络参数
+        if args.keep:
             self.text_key = nn.Parameter(prev_key)
             self.text_prompt = nn.Parameter(prev_prompt)
         else:
@@ -51,7 +55,7 @@ class CoOp:
         else:
             return (pred == label).sum().item()
 
-    def fit(self, data_loader, class_names, task_info):
+    def train(self, data_loader, class_names, task_info):
         # 这里代表每个epoch中有多少batch
         per_epoch_steps = len(data_loader)
         """ 1. 在这里将text key和prompt放入clip模型中"""
@@ -96,8 +100,11 @@ class CoOp:
         self.n_class = len(class_names)
         # 通过深拷贝clip模型，实现clip主体参数的冻结，只训练key和prompt
         clip_model = deepcopy(self.clip_model)
-        """自己实现的clip模型，以方便修改结构，放入text key和prompt参数"""
+        # attriclip的，自己实现的clip模型，以方便修改结构，放入text key和prompt参数
         self.model = CLIP(self.args, class_names, clip_model, text_key, text_prompt, self.n_ctx)
+        # hpt的，
+        # self.model = CustomCLIP(self.args,class_names,clip_model)
+
         if self.use_grad_checkpoint:
             try:
                 self.model.text_encoder.transformer.use_gradient_checkpoint = True
@@ -113,6 +120,8 @@ class CoOp:
             self.optimizer,
             lr=self.lr,
             total_step=self.epochs * per_epoch_steps)
+
+
 
     @torch.no_grad()
     def accuracy(self, loader, num_test, test_class, mean_per_class=False):

@@ -3,4 +3,4 @@ regex~=2023.10.3
 tqdm~=4.66.1
 
 setuptools~=68.2.2
-openai~=1.25.0
+openai~

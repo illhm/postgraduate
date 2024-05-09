@@ -13,7 +13,7 @@ from torch.overrides import (
     has_torch_function, has_torch_function_unary, has_torch_function_variadic,
     handle_torch_function)
 
-from torch.nn.functional import _in_projection_packed, linear, softmax
+from torch.nn.functional import linear, softmax, pad, dropout
 
 
 class MultiheadAttention(Module):
@@ -318,7 +318,7 @@ def multi_head_attention_forward(
     # compute in-projection
     #
     if not use_separate_proj_weight:
-        q, k, v = _in_projection_packed(query, key, value, in_proj_weight.half(), in_proj_bias.half())
+        q, k, v = torch.nn.functional._in_projection_packed(query, key, value, in_proj_weight.half(), in_proj_bias.half())
     else:
         assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
         assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
@@ -327,7 +327,7 @@ def multi_head_attention_forward(
             b_q = b_k = b_v = None
         else:
             b_q, b_k, b_v = in_proj_bias.chunk(3)
-        q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
+        q, k, v = torch.nn.functional._in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
 
     # prep attention mask
     if attn_mask is not None:
@@ -528,7 +528,7 @@ def softmax(input: Tensor, dim: Optional[int] = None, _stacklevel: int = 3, dtyp
     if has_torch_function_unary(input):
         return handle_torch_function(softmax, (input,), input, dim=dim, _stacklevel=_stacklevel, dtype=dtype)
     if dim is None:
-        dim = _get_softmax_dim("softmax", input.dim(), _stacklevel)
+        dim = torch.nn.functional._get_softmax_dim("softmax", input.dim(), _stacklevel)
     if dtype is None:
         ret = input.softmax(dim)
     else:

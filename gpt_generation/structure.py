@@ -31,12 +31,12 @@ def get_completion(client, prompt, model="gpt-3.5-turbo", temperature=1):
     )
     return response.choices[0].message.content.strip()
 
-def get_Classes_Structures(args, classnames):
+def get_All_Structures(args):
     # 要使用全局变量并赋值，需要使用global关键字
     global structures
     # 1. 若没有缓存
     if structures is None:
-        path = osp.join(args.gpt_dir ,'structure', args.dataset + '.json')
+        path = osp.join(args.gpt_dir, 'structure', args.dataset + '.json')
         # 1.1 若文件存在，则直接读取
         if osp.isfile(path):
             with open(path, 'r') as f:
@@ -49,7 +49,7 @@ def get_Classes_Structures(args, classnames):
                 base_url="https://api.chatanywhere.com.cn/v1"
             )
             # 1.2.2 先读取description，作为prompt
-            descrip_path = osp.join(args.gpt_dir,'description', args.dataset + '.json')
+            descrip_path = osp.join(args.gpt_dir, 'description', args.dataset + '.json')
             with open(descrip_path, 'r') as f:
                 prompt_templates = json.load(f)
 
@@ -63,7 +63,10 @@ def get_Classes_Structures(args, classnames):
             # 1.2.4 最后将缓存写入文件
             with open(structure_path, 'w') as f:
                 json.dump(structures, f, indent=4)
+    return structures
 
+def get_Classes_Structures(args, classnames):
+    structures = get_All_Structures(args)
     # 2. 从缓存中读取对应classes的structures
     reuslt=[structures[i] for i in classnames]
     return reuslt

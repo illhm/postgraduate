@@ -204,14 +204,14 @@ def read_and_split_data(image_dir,  p_trn=0.5, p_val=0.2, ignored=[], new_cnames
 
         return train, val, test
 
-def get_lab2cname(data_source):
+def get_lab2cname(data_list):
     """Get a label-to-classname mapping (dict).
 
     Args:
-        data_source (list): a list of [image,label,classname] objects.
+        data_list (list): a list of [image,label,classname] objects.
     """
     container = set()
-    for item in data_source:
+    for item in data_list:
         container.add((item[1], item[2]))
     mapping = {label: classname for label, classname in container}
     labels = list(mapping.keys())

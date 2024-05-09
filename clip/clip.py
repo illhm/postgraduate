@@ -25,7 +25,7 @@ except ImportError:
 if torch.__version__.split(".") < ["1","7","1"]:
     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
-__all__ = ["available_models", "load", "tokenize"]
+__all__ = ["available_models", "load_and_build_clip", "tokenize"]
 _tokenizer = _Tokenizer()
 
 _MODELS = {
@@ -86,7 +86,7 @@ def available_models() -> List[str]:
     """Returns the names of available CLIP models"""
     return list(_MODELS.keys())
 
-def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit: bool = False, download_root: str = None):
+def load_and_build_clip(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit: bool = False, download_root: str = None):
     """Load a CLIP model
 
     Parameters
@@ -112,15 +112,16 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
         A torchvision transform that converts a PIL image into a tensor that the returned model can take as its input
     """
     if name in _MODELS:
+        # 1. 下载
         model_path = _download(_MODELS[name], download_root or os.path.expanduser("~/.cache/clip"))
     elif os.path.isfile(name):
-        # 1.
+        # 2. 预先下载好放到服务器上了
         model_path = name 
     else:
         raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
         
     try:
-        # 2. loading JIT archive
+        # 3. 加载loading JIT archive
         model = torch.jit.load(model_path, map_location=device if jit else "cpu").eval()
         state_dict = None
     except RuntimeError:
@@ -131,7 +132,7 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
         state_dict = torch.load(model_path, map_location="cpu")
 
     if not jit:
-        # 3.
+        # 4. 根据加载得到的模型的state_dict（包括参数和持久缓冲区，以(key,value)形式给出）来组装clip模型
         model = build_model(state_dict or model.state_dict()).to(device)
         if str(device) == "cpu":
             model.float()

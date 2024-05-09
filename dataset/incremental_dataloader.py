@@ -11,7 +11,6 @@ from torch.utils.data.sampler import SubsetRandomSampler
 
 from datasets.caltech101_ava import SplitCaltech
 from .imagenet100 import imagenet100
-
 try:
     from torchvision.transforms import InterpolationMode
 
@@ -45,49 +44,53 @@ class SubsetRandomSampler(Sampler):
 
 class IncrementalDataset:
 
-    def __init__(self, args, random_order=False, shuffle=True, workers=8, batch_size=128, seed=1,
-                 increment=10, validation_split=0.):
+    def __init__(self, args, random_order=False, shuffle=True, workers=8, seed=1,
+                  validation_split=0.):
         """获取各个数据集的加载类及transform"""
-        dataset_class = _get_dataset_class(args.db_name)
+        loadclass_of_dataset = _get_dataset_class(args.dataset)
         self.args = args
         """真正加载数据集图片，并实例化train和test 的dataset对象"""
         self._setup_data(
-            dataset_class,
+            loadclass_of_dataset,
             args.root,
             random_order=random_order,
             seed=seed,
-            increment=increment,
             validation_split=validation_split
         )
 
         self._current_task = 0
-        self._batch_size = batch_size
         self._workers = workers
         self._shuffle = shuffle
         self.sample_per_task_testing = {}
 
-    def _setup_data(self, dataset_class, dataset_dir, random_order=False, seed=1, increment=10, validation_split=0.):
-        self.increments = []
+    def _setup_data(self, loadclass_of_dataset, dataset_dir, random_order=False, seed=1,  validation_split=0.):
+        """加载指定数据集，得到train、test、eval，"""
+        self.incre_steps = []
         self.class_order = []
-        all_data_loaded = dataset_class(dataset_dir)
-        self.train_dataset, self.test_dataset, self.eval_dataset = all_data_loaded.getTrainTest_Dataset()
-        self.class_names = all_data_loaded.get_class_names()
+        # 1. 传入数据集路径，加载所有图片
+        load_class = loadclass_of_dataset(dataset_dir)
+        # 2. 获取三个subset及所有classname
+        self.train_dataset, self.test_dataset, self.eval_dataset = load_class.getTrainTestEval_Dataset()
+        self.class_names = load_class.get_class_names()
 
-        # 生成class的order列表
+        # 3. 生成class的order列表——这里是按原顺序，可以自行更改
         order = [i for i in range(self.args.num_class)]
         if random_order:
             random.seed(seed)
             random.shuffle(order)
         self.class_order.append(order)
-        # self.increments里存的是每个task中的class数量，比如[10,10,10]
-        self.increments = [increment for _ in range(len(order) // increment)]
+        # 4. 计算每个增量步骤中的class数量，list长度就是任务总数量，——self.increments里存的是每个task中的class数量，比如[10,10,10]
+        self.incre_steps = [self.args.class_per_task for _ in range(len(order) // self.args.class_per_task)]
 
     @property
-    def n_tasks(self):
-        return len(self.increments)
+    def taskNum(self):
+        return len(self.incre_steps)
 
-    """从data_list中将符合指定label_list的数据全部提取出来"""
+    def get_classnames(self):
+        return self.class_names
+
     def get_dataIndexs_by_labels(self, dataset, label_list, mode="train"):
+        """从data_list中将符合指定label_list的数据全部提取出来"""
         indexs = []
         for i,item in enumerate(dataset.get_dataList()):
             if item[1] in label_list:
@@ -95,14 +98,16 @@ class IncrementalDataset:
 
         return indexs
 
-    """获取test数据，范围是训练至今的所有任务"""
-    def get_data_index_test(self, dataset, label, mode="test"):
-        label_indices = []
+
+    def get_dataIndexs_of_test(self, dataset, label, mode="test"):
+        """获取test数据，范围是训练至今的所有任务"""
+        label_indexs = []
         label_targets = []
 
         np_indexs = np.array(list(range(len(dataset.get_dataList()))), dtype="uint32")
         np_target = np.array([i[1] for i in dataset.get_dataList()], dtype="uint32")
 
+        #
         for t in range(len(label) // self.args.class_per_task):
             task_ids = []
             for class_id in label[t * self.args.class_per_task: (t + 1) * self.args.class_per_task]:
@@ -112,40 +117,40 @@ class IncrementalDataset:
             task_ids.ravel()
             random.shuffle(task_ids)
 
-            label_indices.extend(list(np_indexs[task_ids]))
+            label_indexs.extend(list(np_indexs[task_ids]))
             label_targets.extend(list(np_target[task_ids]))
             if (t not in self.sample_per_task_testing.keys()):
                 self.sample_per_task_testing[t] = len(task_ids)
-        label_indices = np.array(label_indices, dtype="uint32")
-        label_indices.ravel()
-        return list(label_indices), label_targets
+        label_indexs = np.array(label_indexs, dtype="uint32")
+        label_indexs.ravel()
+        return list(label_indexs), label_targets
 
     def new_task(self):
-        print("current_task：{},class_num：{}".format(self._current_task,self.increments[self._current_task]))
+        print("current_task：{},class_num：{}".format(self._current_task, self.incre_steps[self._current_task]))
         # 1. 获取本task中的class的序号范围
-        min_class = sum(self.increments[:self._current_task])
-        max_class = sum(self.increments[:self._current_task + 1])
+        min_class = sum(self.incre_steps[:self._current_task])
+        max_class = sum(self.incre_steps[:self._current_task + 1])
         # 2. 根据序号范围获取class名称
         train_class_names = self.class_names[min_class:max_class]
         test_class_names = self.class_names[:max_class]
         # todo list(range(min_class, max_class))->[order[i] for in range(min_class, max_class)]
         train_indexs = self.get_dataIndexs_by_labels(self.train_dataset, list(range(min_class, max_class)),
                                                                  mode="train")
-        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self._batch_size,
-                                                             shuffle=False, num_workers=8,
+        self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.args.train_batch,
+                                                             shuffle=False, num_workers=self._workers,
                                                              #Sampler参数用于指定如何对数据进行采样，即确定每个批次中包含哪些样本。SubsetRandomSampler意为从给定的索引子集中进行随机采样
-                                                             sampler=SubsetRandomSampler(train_indexs, False))
+                                                             sampler=SubsetRandomSampler(train_indexs, False),drop_last=True)
 
-        test_indexs, _ = self.get_data_index_test(self.test_dataset, list(range(max_class)), mode="test")
+        test_indexs, _ = self.get_dataIndexs_of_test(self.test_dataset, list(range(max_class)), mode="test")
         self.test_data_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.args.test_batch,
-                                                            shuffle=False, num_workers=8,
-                                                            sampler=SubsetRandomSampler(test_indexs, False))
+                                                            shuffle=False, num_workers=self._workers,
+                                                            sampler=SubsetRandomSampler(test_indexs, False),drop_last=True)
         #没处理val_data_loader
         task_info = {
             "min_class": min_class,
             "max_class": max_class,
             "current_task": self._current_task,
-            "max_task": len(self.increments),
+            "max_task": len(self.incre_steps),
             "n_train_data": len(train_indexs),
             "n_test_data": len(test_indexs)
         }

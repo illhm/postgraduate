@@ -3,7 +3,7 @@ from openai import OpenAI
 from tqdm import tqdm
 import os.path as osp
 
-from main_incremental_submit import parse_option
+
 
 global_api_key = "sk-Ffy7Zo73qNffmZE9vxroEqv0uigsGdrkWO7oQREiJpzjpxoR" # Enter Your API Key!!!
 #class description缓存
@@ -47,7 +47,7 @@ def get_completion(client, prompt, model="gpt-3.5-turbo", temperature=1):
     )
     return response.choices[0].message.content.strip()
 
-def get_Classes_Descriptions(args, classnames):
+def get_All_Descriptions(args):
     # 要使用全局变量并赋值，需要使用global关键字
     global descriptions
     # 1. 若没有缓存
@@ -85,11 +85,16 @@ def get_Classes_Descriptions(args, classnames):
             # 1.2.4 将缓存内容写入json文件——indent，根据数据格式缩进显示，读起来更加清晰
             with open(cls_descrip_path, 'w') as f:
                 json.dump(descriptions, f, indent=4)
+    return descriptions
 
+def get_Classes_Descriptions(args, classnames):
+    descriptions = get_All_Descriptions(args)
     # 2. 从缓存中读取对应classes的descriptions
     reuslt=[descriptions[i] for i in classnames]
     return reuslt
 
-if __name__ == "__main__":
-    args = parse_option()
-    get_Classes_Descriptions(args,["face", "leopard", "motorbike"])
+
+# from main_incremental_submit import parse_option
+# if __name__ == "__main__":
+#     args = parse_option()
+#     get_Classes_Descriptions(args,["face", "leopard", "motorbike"])
