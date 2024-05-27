@@ -278,7 +278,7 @@ class Original_CLIP(nn.Module):
                 input_resolution=image_resolution,
                 width=vision_width
             )
-        else:
+        else:#1
             vision_heads = vision_width // 64
             self.visual = VisionTransformer(
                 input_resolution=image_resolution,

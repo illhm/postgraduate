@@ -68,7 +68,7 @@ def get_All_Structures(args):
 def get_Classes_Structures(args, classnames):
     structures = get_All_Structures(args)
     # 2. 从缓存中读取对应classes的structures
-    reuslt=[structures[i] for i in classnames]
+    reuslt={i:structures[i] for i in classnames}
     return reuslt
 
 

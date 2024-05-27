@@ -58,7 +58,6 @@ class IncrementalDataset:
             validation_split=validation_split
         )
 
-        self._current_task = 0
         self._workers = workers
         self._shuffle = shuffle
         self.sample_per_task_testing = {}
@@ -125,11 +124,11 @@ class IncrementalDataset:
         label_indexs.ravel()
         return list(label_indexs), label_targets
 
-    def new_task(self):
-        print("current_task：{},class_num：{}".format(self._current_task, self.incre_steps[self._current_task]))
+    def get_task_data(self, current_task):
+        print("current_task：{},class_num：{}".format(current_task, self.incre_steps[current_task]))
         # 1. 获取本task中的class的序号范围
-        min_class = sum(self.incre_steps[:self._current_task])
-        max_class = sum(self.incre_steps[:self._current_task + 1])
+        min_class = sum(self.incre_steps[:current_task])
+        max_class = sum(self.incre_steps[:current_task + 1])
         # 2. 根据序号范围获取class名称
         train_class_names = self.class_names[min_class:max_class]
         test_class_names = self.class_names[:max_class]
@@ -149,13 +148,11 @@ class IncrementalDataset:
         task_info = {
             "min_class": min_class,
             "max_class": max_class,
-            "current_task": self._current_task,
+            "current_task": current_task,
             "max_task": len(self.incre_steps),
             "n_train_data": len(train_indexs),
             "n_test_data": len(test_indexs)
         }
-
-        self._current_task += 1
 
         return  self.train_data_loader, self.test_data_loader,train_class_names, test_class_names,  task_info
 

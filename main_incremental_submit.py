@@ -9,6 +9,7 @@ import torch
 import dataset.incremental_dataloader as incremental_dataloader
 from classifier.CoOp import CoOp
 from utils import mkdir_p
+from gpt_generation import structure
 
 
 def parse_option():
@@ -55,7 +56,7 @@ def parse_option():
     parser.add_argument("--v_prompt_length", type=int, default=10, help='prompt length')
     parser.add_argument("--t_prompt_length", type=int, default=10, help='prompt length')
 
-    parser.add_argument("--text_prompt", type=int, default=3, help='text_prompt')
+    parser.add_argument("--text_prompt", type=int, default=5, help='text_prompt')
     parser.add_argument("--keep", type=bool, default=False, help='keep')  # continue from other datasets
 
     args, unparsed = parser.parse_known_args()
@@ -76,35 +77,22 @@ def main(args):
                                                             # random class
                                                             shuffle=True, seed=args.seed, workers=8, validation_split=0, )
     # 2. 加载训练模型
-    # 2.1 是否使用预训练的（key，prompt）
-    prev_key, prev_prompt = False, False
     setup_seed(args.seed)
-    if args.keep:
-        # 之前训练的结果
-        path_key = os.path.join(args.keyprompt_path, 'text_key.pth.tar')
-        path_prompt = os.path.join(args.keyprompt_path, 'text_prompt.pth.tar')
-        prev_key = torch.load(path_key)
-        prev_prompt = torch.load(path_prompt)
-        print('init prompt trained from previous dataset')
-    else:
-        print('init prompt from random')
-    # 2.2 加载CoOp算法模型
-    if args.model == 'coop':
-        algorithm = CoOp(prev_key, prev_prompt, args, inc_dataset)
+    algorithm = CoOp( args, inc_dataset)
 
-    start_task = args.start_task
-    memory = None
+    # 3. 开始训练过程,对于每一个增量任务
+    for task in range(args.start_task, args.num_task):
+        # 3.1 获取增量任务数据
+        train_loader, test_loader, train_classnames, test_classnames, task_info  = inc_dataset.get_task_data(task)
 
-    # 3. 开始训练过程
-    for task in range(start_task, args.num_task):
-        # 3.1 获取增量任务及增量数据
-        train_loader, test_loader, train_classnames, test_classnames, task_info  = inc_dataset.new_task()
-        # 3.2 根据配置项，可实现接续训练
-        if start_task != 0 and start_task == task:
-            inc_dataset._current_task = task
-            with open(args.save_path + "/sample_per_task_testing_" + str(task - 1) + ".pickle", 'rb') as handle:
-                sample_per_task_testing = pickle.load(handle)
-            inc_dataset.sample_per_task_testing = sample_per_task_testing
+        # 3.2 取出所有entity，去重后送入model
+        class_structures = structure.get_Classes_Structures(args,train_classnames)
+        entities = []
+        for classname,info in class_structures.items():
+            for j in info:
+                entities.extend(j["Entities"] + j["Attributes"])
+        keys=set(i.lower() for i in entities)
+        task_info['keys']=keys
 
         # 3.3 打印训练参数
         print('task {} start to fit, taskInfo:{}'.format(task,str(task_info)))
@@ -113,22 +101,24 @@ def main(args):
         # 3.4 增量task数据送入模型开始增量训练
         algorithm.train(train_loader, train_classnames, task_info)
 
-        # 3.5 保存训练模型及（key，prompt）等运行结果
-        if not os.path.isdir(args.save_path):
-            mkdir_p(args.save_path)
-        np.save(args.save_path + "/seed.txt", args.seed)
-        torch.save(algorithm.model.state_dict()['text_key'], os.path.join(args.save_path, 'text_key.pth.tar'))
-        torch.save(algorithm.model.prompt_learner.state_dict()['text_prompt'],
-                   os.path.join(args.save_path, 'text_prompt.pth.tar'))
         acc = algorithm.accuracy(test_loader, args.num_test, test_classnames, mean_per_class=args.mean_per_class)
-        print('acc', acc)
-        # 3.6 运行数据指标保存
-        with open(args.save_path + "/memory_" + str(args.current_task) + ".pickle", 'wb') as handle:
-            pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(args.save_path + "/acc_task_" + str(args.current_task) + ".pickle", 'wb') as handle:
-            pickle.dump(acc, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(args.save_path + "/sample_per_task_testing_" + str(args.current_task) + ".pickle", 'wb') as handle:
-            pickle.dump(inc_dataset.sample_per_task_testing, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        save_result(args,algorithm,acc)
+
+
+def save_result(args,algorithm,acc):
+    # 3.5 保存训练模型及（key，prompt）等运行结果
+    if not os.path.isdir(args.save_path):
+        mkdir_p(args.save_path)
+    np.save(args.save_path + "/seed.txt", args.seed)
+    torch.save(algorithm.model.state_dict()['text_key'], os.path.join(args.save_path, 'text_key.pth.tar'))
+    torch.save(algorithm.model.prompt_learner.state_dict()['text_prompt'],
+               os.path.join(args.save_path, 'text_prompt.pth.tar'))
+
+    print('test acc', acc)
+    # 3.6 运行数据指标保存
+    with open(args.save_path + "/acc_task_" + str(args.current_task) + ".pickle", 'wb') as handle:
+        pickle.dump(acc, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 
 
 if __name__ == '__main__':
