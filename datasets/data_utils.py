@@ -217,4 +217,5 @@ def get_lab2cname(data_list):
     labels = list(mapping.keys())
     labels.sort()
     classnames = [mapping[label] for label in labels]
+    classnames = [p.replace("_", " ") for p in classnames]
     return mapping, classnames
