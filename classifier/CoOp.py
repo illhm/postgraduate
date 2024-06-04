@@ -8,6 +8,7 @@ from clip.clip import load_and_build_clip, CLIP
 from .utils import build_cosine_scheduler, cosine_loss
 from clip import hp_clip
 from clip.hp_clip import CustomCLIP
+import gc
 
 class CoOp:
     def __init__(self,  args, n_ctx=12, use_float32=False, use_grad_checkpoint=False):
@@ -15,7 +16,6 @@ class CoOp:
         clip_model, _ = load_and_build_clip(args.backbone_path)
         # clip_model= hp_clip.load_clip_to_cpu(args=args).to(torch.device("cuda"))     # 1.2 这一句是HPT中的，
         # 1.1 将模型设置为Evaluation模式，和model.train()相对应，这对于某些特定类型的层是非常重要的，比如 BatchNorm 和 Dropout 层，它们在训练和评估阶段的行为是不同的
-        clip_model.eval()
         if use_float32:
             clip_model.float()
         self.clip_model = clip_model
@@ -44,53 +44,64 @@ class CoOp:
         batch_num = len(data_loader)
         """ 1. 在这里将text key和prompt放入clip模型中"""
         # 对于每个task，将其中class对应的attribute、entity作为text_key，训练相应的text_prompt，再进行匹配，计算loss
-        # todo 要适应cl，这里的text_key就需要是带继承的，不能每次只是该task生成的
+        # todo 要适应cl，这里的text_key就需要是带继承的，不能每次只是该task生成的 1500MB
         self.init_clip_model(task_classnames, batch_num, task_info)
         self.model.eval()
+
+        outputs=[]
         # 2. train过程，计算CE损失，匹配损失和正交损失
         for epoch in range(self.epochs):
             loop = tqdm(data_loader, total=len(data_loader))
             loop.set_description(f'Epoch [{epoch}/{self.epochs}]')
-            print(" ")
             total_loss, total_match, total_num = 0.0, 0, 0
             for idx, (images, labels, names) in enumerate(loop):
-                labels = labels - self.args.class_per_task * task_info['current_task']
+                self.optimizer.zero_grad()
+                labels = (labels - self.args.class_per_task * task_info['current_task']).cuda()
                 # lab_idx = label.cpu().numpy().tolist()
                 cur_iter_idx = epoch * batch_num + idx
                 self.cur_iter_idx = cur_iter_idx
                 self.scheduler.step(cur_iter_idx)
                 # clip模型的forward函数在这里调用，具体函数见159行
                 output, image_features, chosen_keys = self.model(images.cuda())
-                match = self.count_acc(output, labels.cuda())
+                match = self.count_acc(output, labels)
                 # 根据结果，计算loss
-                loss_main = F.cross_entropy(output, labels.cuda())
+                loss = F.cross_entropy(output, labels)
                 # loss_k用于将选中的keys和image embedding的距离拉近
                 # loss_k = cosine_loss(image_features, chosen_keys)
                 # loss = loss_main + 0.5 * loss_k
-                loss = loss_main
                 total_loss += loss
                 # 梯度后向传播
-                self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
                 total_num += labels.shape[0]
                 total_match += match
                 epoch_acc = float(match) / float(labels.shape[0])
+
                 # print("match={},batch={}".format(match, labels.shape[0]))
                 # loop.set_postfix(loss=loss.item(), acc=epoch_acc)  # 为进度条显示额外信息
-            print("epoch:{}, train_accuracy={}, average_loss={}".format(epoch, float(total_match) / float(total_num),
+
+            outputs.append("epoch:{}, train_accuracy={}, average_loss={}".format(epoch, float(total_match) / float(total_num),
                                                                         float(total_loss) / float(idx + 1)))
+        print("\n".join(outputs))
+
+
+
+    def clearGpuMemory(self):
+        del self.model
+        torch.cuda.empty_cache()
+        gc.collect()
 
     def init_clip_model(self, task_classnames, batch_num, task_info):
 
         self.n_class = len(task_classnames)
-        # 通过深拷贝clip模型，实现clip主体参数的冻结，只训练key和prompt
+        # 通过深拷贝clip模型，实现clip主体参数的冻结，只训练key和prompt 1200MB
         clip_model = deepcopy(self.clip_model)
 
         # attriclip的，自己实现的clip模型，以方便修改结构，放入text key和prompt参数
-        # todo 每次都copy一个新的model，有必要吗，不是只要冻结其梯度，只开启需训练参数的梯度即可吗
+        # todo 每次都copy一个新的model，有必要吗，不是只要冻结其梯度，只开启需训练参数的梯度即可吗 800MB
         self.model = CLIP(self.args, task_classnames, clip_model, task_info, self.n_ctx)
+
         # hpt的，
         # self.model = CustomCLIP(self.args,class_names,clip_model)
 
@@ -101,17 +112,15 @@ class CoOp:
                 self.model.text_encoder.module.transformer.use_gradient_checkpoint = True
 
         """在这里将text key和prompt的参数放入optimizer中进行优化"""
-        Other_params = [param for name, param in self.model.named_parameters() if 'entity_embeddings' in name]
-        param_dict = [{'params': [p for p in self.model.prompt_learner.parameters() if p.requires_grad]},
-                      {'params': Other_params}]
+        Other_params = [param for name, param in self.model.named_parameters() if param.requires_grad]
+        # param_dict = [{'params': [p for p in self.model.prompt_learner.parameters() if p.requires_grad]},
+        #               {'params': Other_params}]
+        param_dict = [{'params': Other_params}]
         self.optimizer = torch.optim.SGD(param_dict, lr=self.lr, weight_decay=self.wd)
-        # self.optimizer = torch.optim.Adam(param_dict, lr=self.lr, weight_decay=self.wd)
         self.scheduler = build_cosine_scheduler(
             self.optimizer,
             lr=self.lr,
             total_step=self.epochs * batch_num)
-
-
 
     @torch.no_grad()
     def accuracy(self, loader, num_test, test_class, mean_per_class=False):
